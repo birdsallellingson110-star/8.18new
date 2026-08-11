@@ -1,0 +1,324 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1050" viewBox="0 0 1800 1050">
+  <defs>
+    <style>
+      .title { font: 700 32px Arial, Helvetica, sans-serif; fill: #172033; }
+      .subtitle { font: 400 16px Arial, Helvetica, sans-serif; fill: #536079; }
+      .section { font: 700 18px Arial, Helvetica, sans-serif; fill: #172033; }
+      .label { font: 700 15px Arial, Helvetica, sans-serif; fill: #172033; }
+      .body { font: 400 13px Arial, Helvetica, sans-serif; fill: #46536b; }
+      .small { font: 400 11px Arial, Helvetica, sans-serif; fill: #647087; }
+      .tiny { font: 600 10px Arial, Helvetica, sans-serif; fill: #647087; }
+      .math { font: italic 14px Georgia, serif; fill: #172033; }
+      .mono { font: 600 12px "Courier New", monospace; fill: #23314c; }
+      .panel { fill: #ffffff; stroke: #cbd3df; stroke-width: 1.5; rx: 10; }
+      .soft-blue { fill: #eef5ff; stroke: #78a6dc; stroke-width: 1.5; rx: 8; }
+      .soft-teal { fill: #eaf8f5; stroke: #4ea792; stroke-width: 1.5; rx: 8; }
+      .soft-orange { fill: #fff4e8; stroke: #dd9250; stroke-width: 1.5; rx: 8; }
+      .soft-red { fill: #fff0f0; stroke: #d66b70; stroke-width: 1.5; rx: 8; }
+      .soft-purple { fill: #f3effb; stroke: #8b76ba; stroke-width: 1.5; rx: 8; }
+      .arrow { fill: none; stroke: #5e6b82; stroke-width: 2; marker-end: url(#arrow); }
+      .arrow-blue { fill: none; stroke: #397dc0; stroke-width: 2.4; marker-end: url(#arrowBlue); }
+      .arrow-teal { fill: none; stroke: #278b76; stroke-width: 2.4; marker-end: url(#arrowTeal); }
+      .arrow-dash { fill: none; stroke: #b26a32; stroke-width: 2.2; stroke-dasharray: 7 5; marker-end: url(#arrowOrange); }
+      .joint { fill: #ffffff; stroke: #34455f; stroke-width: 2; }
+      .bone { stroke: #34455f; stroke-width: 3; stroke-linecap: round; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#5e6b82"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#397dc0"/>
+    </marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#278b76"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#b26a32"/>
+    </marker>
+    <linearGradient id="heat" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e7f4ff"/>
+      <stop offset="0.45" stop-color="#75b4dc"/>
+      <stop offset="1" stop-color="#e46c5f"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#172033" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1800" height="1050" fill="#f7f9fc"/>
+  <text x="50" y="48" class="title">Configuration-Robust Multi-View 3D Pose Lifting</text>
+  <text x="50" y="77" class="subtitle">Sparse-view self-distillation with unified layer-wise learnable geometry and confidence-biased ray attention</text>
+  <rect x="1492" y="28" width="258" height="44" rx="22" fill="#172033"/>
+  <text x="1621" y="55" text-anchor="middle" style="font:700 14px Arial; fill:#ffffff;">Single model at inference</text>
+
+  <!-- Column 1: observations -->
+  <rect x="45" y="110" width="300" height="750" class="panel" filter="url(#shadow)"/>
+  <rect x="45" y="110" width="300" height="48" rx="10" fill="#dfeaf8"/>
+  <text x="195" y="140" text-anchor="middle" class="section">1. Multi-view observations</text>
+
+  <text x="70" y="188" class="label">Arbitrary camera configuration</text>
+  <text x="70" y="210" class="small">2D keypoints, detector confidence, calibration</text>
+
+  <!-- cameras -->
+  <g transform="translate(72 235)">
+    <g transform="translate(0 0)">
+      <rect x="0" y="8" width="42" height="28" rx="4" fill="#397dc0"/>
+      <path d="M42 14 L59 7 L59 37 L42 30 Z" fill="#2e659d"/>
+      <circle cx="20" cy="22" r="7" fill="#dceeff"/>
+      <text x="28" y="55" text-anchor="middle" class="tiny">view 1</text>
+    </g>
+    <g transform="translate(90 0)">
+      <rect x="0" y="8" width="42" height="28" rx="4" fill="#278b76"/>
+      <path d="M42 14 L59 7 L59 37 L42 30 Z" fill="#1f715f"/>
+      <circle cx="20" cy="22" r="7" fill="#dcf5ef"/>
+      <text x="28" y="55" text-anchor="middle" class="tiny">view 2</text>
+    </g>
+    <g transform="translate(180 0)">
+      <rect x="0" y="8" width="42" height="28" rx="4" fill="#dd9250"/>
+      <path d="M42 14 L59 7 L59 37 L42 30 Z" fill="#b26a32"/>
+      <circle cx="20" cy="22" r="7" fill="#fff0df"/>
+      <text x="28" y="55" text-anchor="middle" class="tiny">view K</text>
+    </g>
+  </g>
+
+  <!-- 2D skeleton observations -->
+  <rect x="70" y="315" width="250" height="150" class="soft-blue"/>
+  <text x="85" y="339" class="label">2D pose evidence</text>
+  <g transform="translate(117 355) scale(.72)">
+    <circle cx="50" cy="13" r="9" fill="#ffffff" stroke="#397dc0" stroke-width="3"/>
+    <line x1="50" y1="23" x2="50" y2="72" stroke="#397dc0" stroke-width="5"/>
+    <line x1="50" y1="34" x2="20" y2="58" stroke="#397dc0" stroke-width="5"/>
+    <line x1="50" y1="34" x2="82" y2="55" stroke="#397dc0" stroke-width="5"/>
+    <line x1="50" y1="72" x2="30" y2="113" stroke="#397dc0" stroke-width="5"/>
+    <line x1="50" y1="72" x2="73" y2="111" stroke="#397dc0" stroke-width="5"/>
+    <circle cx="20" cy="58" r="5" fill="#ffffff" stroke="#397dc0" stroke-width="3"/>
+    <circle cx="82" cy="55" r="5" fill="#ffffff" stroke="#397dc0" stroke-width="3"/>
+    <circle cx="30" cy="113" r="5" fill="#ffffff" stroke="#397dc0" stroke-width="3"/>
+    <circle cx="73" cy="111" r="5" fill="#ffffff" stroke="#397dc0" stroke-width="3"/>
+  </g>
+  <g transform="translate(213 355) scale(.72)">
+    <circle cx="50" cy="13" r="9" fill="#ffffff" stroke="#278b76" stroke-width="3"/>
+    <line x1="50" y1="23" x2="50" y2="72" stroke="#278b76" stroke-width="5"/>
+    <line x1="50" y1="34" x2="15" y2="49" stroke="#278b76" stroke-width="5"/>
+    <line x1="50" y1="34" x2="88" y2="48" stroke="#278b76" stroke-width="5"/>
+    <line x1="50" y1="72" x2="22" y2="108" stroke="#278b76" stroke-width="5"/>
+    <line x1="50" y1="72" x2="81" y2="106" stroke="#278b76" stroke-width="5"/>
+    <circle cx="15" cy="49" r="5" fill="#ffffff" stroke="#278b76" stroke-width="3"/>
+    <circle cx="88" cy="48" r="5" fill="#ffffff" stroke="#278b76" stroke-width="3"/>
+    <circle cx="22" cy="108" r="5" fill="#ffffff" stroke="#278b76" stroke-width="3"/>
+    <circle cx="81" cy="106" r="5" fill="#ffffff" stroke="#278b76" stroke-width="3"/>
+  </g>
+  <text x="195" y="451" text-anchor="middle" class="small">p<tspan baseline-shift="sub">v,j</tspan> = (u, v), c<tspan baseline-shift="sub">v,j</tspan> in [0,1]</text>
+
+  <!-- ray tokenizer -->
+  <path d="M195 468 L195 500" class="arrow-blue"/>
+  <rect x="70" y="500" width="250" height="185" class="soft-teal"/>
+  <text x="85" y="526" class="label">Camera-aware ray tokenizer</text>
+  <text x="85" y="550" class="body">Back-project each 2D joint:</text>
+  <text x="85" y="578" class="math">r<tspan baseline-shift="sub">v,j</tspan>(t) = o<tspan baseline-shift="sub">v</tspan> + t d<tspan baseline-shift="sub">v,j</tspan></text>
+  <line x1="92" y1="620" x2="285" y2="577" stroke="#278b76" stroke-width="2"/>
+  <line x1="92" y1="620" x2="282" y2="638" stroke="#397dc0" stroke-width="2"/>
+  <circle cx="92" cy="620" r="6" fill="#172033"/>
+  <circle cx="285" cy="577" r="5" fill="#278b76"/>
+  <circle cx="282" cy="638" r="5" fill="#397dc0"/>
+  <text x="85" y="668" class="mono">token = E(o) + E(d) + E(c)</text>
+
+  <rect x="70" y="713" width="250" height="115" class="soft-purple"/>
+  <text x="85" y="738" class="label">Universal representation</text>
+  <text x="85" y="762" class="body">No camera-ID lookup table</text>
+  <text x="85" y="784" class="body">Variable K and unseen layouts</text>
+  <text x="85" y="806" class="body">Joint-wise ray tokens</text>
+
+  <!-- Column 2: training -->
+  <rect x="375" y="110" width="440" height="750" class="panel" filter="url(#shadow)"/>
+  <rect x="375" y="110" width="440" height="48" rx="10" fill="#fff0df"/>
+  <text x="525" y="140" text-anchor="middle" class="section">2. Hard-view self-distillation</text>
+  <rect x="670" y="122" width="122" height="25" rx="12" fill="#dd9250"/>
+  <text x="731" y="139" text-anchor="middle" style="font:700 10px Arial; fill:#ffffff;">TRAINING ONLY</text>
+
+  <path d="M345 585 C360 585 360 220 400 220" class="arrow"/>
+  <path d="M345 585 C360 585 360 430 400 430" class="arrow"/>
+
+  <rect x="400" y="180" width="390" height="115" class="soft-blue"/>
+  <text x="420" y="205" class="label">Full-view teacher (K = 5)</text>
+  <text x="420" y="228" class="body">Same network, stop-gradient forward</text>
+  <text x="420" y="252" class="math">P<tspan baseline-shift="sub">T</tspan> = f<tspan baseline-shift="sub">&#952;</tspan>({r<tspan baseline-shift="sub">v</tspan>}<tspan baseline-shift="sub">v=1..5</tspan>)</text>
+  <rect x="650" y="205" width="110" height="55" rx="6" fill="#ffffff" stroke="#78a6dc"/>
+  <text x="705" y="228" text-anchor="middle" class="tiny">stable 3D</text>
+  <text x="705" y="245" text-anchor="middle" class="tiny">soft target</text>
+
+  <rect x="400" y="330" width="390" height="190" class="soft-red"/>
+  <text x="420" y="357" class="label">Primary branch: hard K2 student</text>
+  <text x="420" y="382" class="body">Sample candidate camera pairs and select:</text>
+  <rect x="425" y="400" width="340" height="42" rx="6" fill="#ffffff" stroke="#d66b70"/>
+  <text x="595" y="426" text-anchor="middle" class="math">S* = arg max<tspan baseline-shift="sub">|S|=2</tspan> ||f<tspan baseline-shift="sub">&#952;</tspan>(S) - P<tspan baseline-shift="sub">T</tspan>||</text>
+  <text x="420" y="468" class="body">Every batch preserves the hardest sparse geometry.</text>
+  <text x="420" y="493" class="mono">K2 supervision is never diluted</text>
+  <path d="M595 295 L595 330" class="arrow-dash"/>
+
+  <rect x="400" y="550" width="390" height="140" class="soft-orange"/>
+  <text x="420" y="577" class="label">Strict GBT module ablation</text>
+  <text x="420" y="602" class="body">Same distillation data, seed, epochs and evaluation</text>
+  <text x="420" y="626" class="body">One attention formula for arbitrary K</text>
+  <text x="420" y="655" class="mono">confidence-only / geometry-only / both</text>
+
+  <rect x="400" y="725" width="390" height="105" class="soft-purple"/>
+  <text x="420" y="751" class="label">Joint training objective</text>
+  <text x="420" y="777" class="math">L = L<tspan baseline-shift="sub">full</tspan> + L<tspan baseline-shift="sub">K2-GT</tspan> + &#955;<tspan baseline-shift="sub">dist</tspan>L<tspan baseline-shift="sub">K2-teacher</tspan></text>
+  <text x="420" y="807" class="small">Full-view teacher + hard K2 student; lower-body distill weight = 0.9</text>
+  <path d="M595 520 L595 725" class="arrow"/>
+
+  <!-- Column 3: model -->
+  <rect x="845" y="110" width="655" height="750" class="panel" filter="url(#shadow)"/>
+  <rect x="845" y="110" width="655" height="48" rx="10" fill="#dff3ee"/>
+  <text x="1172" y="140" text-anchor="middle" class="section">3. Learnable geometry-confidence biased RUMPL</text>
+  <path d="M815 455 L845 455" class="arrow-teal"/>
+  <text x="822" y="438" text-anchor="end" class="tiny">shared weights &#952;</text>
+
+  <rect x="875" y="180" width="595" height="405" class="soft-teal"/>
+  <text x="900" y="210" class="label">Geometry-confidence View Fusion Transformer (per joint)</text>
+
+  <!-- token row -->
+  <g transform="translate(900 235)">
+    <rect x="0" y="0" width="68" height="45" rx="6" fill="#172033"/>
+    <text x="34" y="20" text-anchor="middle" style="font:700 11px Arial; fill:#ffffff;">[FUS]</text>
+    <text x="34" y="35" text-anchor="middle" style="font:400 9px Arial; fill:#cbd7ea;">joint j</text>
+    <rect x="84" y="0" width="68" height="45" rx="6" fill="#dceeff" stroke="#397dc0"/>
+    <text x="118" y="20" text-anchor="middle" class="tiny">ray 1</text>
+    <text x="118" y="35" text-anchor="middle" class="tiny">c1</text>
+    <rect x="168" y="0" width="68" height="45" rx="6" fill="#dcf5ef" stroke="#278b76"/>
+    <text x="202" y="20" text-anchor="middle" class="tiny">ray 2</text>
+    <text x="202" y="35" text-anchor="middle" class="tiny">c2</text>
+    <text x="254" y="27" class="label">...</text>
+    <rect x="284" y="0" width="68" height="45" rx="6" fill="#fff0df" stroke="#dd9250"/>
+    <text x="318" y="20" text-anchor="middle" class="tiny">ray K</text>
+    <text x="318" y="35" text-anchor="middle" class="tiny">cK</text>
+  </g>
+
+  <rect x="900" y="305" width="545" height="72" rx="7" fill="#ffffff" stroke="#4ea792"/>
+  <text x="1172" y="333" text-anchor="middle" class="math">A<tspan baseline-shift="sub">l</tspan> = Softmax(QK<tspan baseline-shift="super">T</tspan>/sqrt(d) + &#951;<tspan baseline-shift="sub">l</tspan>&#178;M<tspan baseline-shift="sub">conf</tspan> - &#947;<tspan baseline-shift="sub">l</tspan>&#178;M<tspan baseline-shift="sub">dist</tspan>)</text>
+  <text x="1172" y="359" text-anchor="middle" class="small">Explicit confidence and 3D ray consistency act before softmax</text>
+
+  <!-- heat matrix -->
+  <g transform="translate(900 402)">
+    <text x="0" y="0" class="label">Ray distance bias</text>
+    <rect x="0" y="18" width="112" height="112" rx="5" fill="url(#heat)" stroke="#ffffff" stroke-width="2"/>
+    <g stroke="#ffffff" stroke-width="1" opacity=".8">
+      <line x1="28" y1="18" x2="28" y2="130"/><line x1="56" y1="18" x2="56" y2="130"/>
+      <line x1="84" y1="18" x2="84" y2="130"/><line x1="0" y1="46" x2="112" y2="46"/>
+      <line x1="0" y1="74" x2="112" y2="74"/><line x1="0" y1="102" x2="112" y2="102"/>
+    </g>
+    <text x="56" y="148" text-anchor="middle" class="tiny">D<tspan baseline-shift="sub">ray</tspan>: closest ray distance</text>
+  </g>
+
+  <!-- scale table -->
+  <g transform="translate(1050 402)">
+    <text x="0" y="0" class="label">Layer-wise learned bias</text>
+    <rect x="0" y="18" width="210" height="112" rx="6" fill="#ffffff" stroke="#4ea792"/>
+    <line x1="0" y1="50" x2="210" y2="50" stroke="#c8ded8"/>
+    <line x1="0" y1="82" x2="210" y2="82" stroke="#c8ded8"/>
+    <line x1="70" y1="18" x2="70" y2="130" stroke="#c8ded8"/>
+    <text x="35" y="40" text-anchor="middle" class="tiny">layer 1</text>
+    <text x="140" y="40" text-anchor="middle" class="mono">eta1^2 / gamma1^2</text>
+    <text x="35" y="72" text-anchor="middle" class="tiny">...</text>
+    <text x="140" y="72" text-anchor="middle" class="mono">learned independently</text>
+    <text x="35" y="105" text-anchor="middle" class="tiny">layer 12</text>
+    <text x="140" y="105" text-anchor="middle" class="mono">eta12^2 / gamma12^2</text>
+    <text x="105" y="123" text-anchor="middle" class="tiny">one formula for arbitrary K</text>
+  </g>
+
+  <!-- attention output -->
+  <g transform="translate(1300 402)">
+    <text x="0" y="0" class="label">Interpretable attention</text>
+    <rect x="0" y="18" width="145" height="112" rx="6" fill="#ffffff" stroke="#4ea792"/>
+    <rect x="18" y="42" width="18" height="65" rx="3" fill="#397dc0"/>
+    <rect x="48" y="68" width="18" height="39" rx="3" fill="#278b76"/>
+    <rect x="78" y="31" width="18" height="76" rx="3" fill="#dd9250"/>
+    <rect x="108" y="81" width="18" height="26" rx="3" fill="#d66b70"/>
+    <text x="72" y="124" text-anchor="middle" class="tiny">view reliability map</text>
+  </g>
+
+  <text x="1172" y="566" text-anchor="middle" class="mono">joint feature z_j = VFT([FUS], ray_1 ... ray_K)</text>
+
+  <path d="M1172 585 L1172 620" class="arrow-teal"/>
+  <rect x="875" y="620" width="285" height="190" class="soft-purple"/>
+  <text x="895" y="648" class="label">Pose Fusion Transformer</text>
+  <text x="895" y="671" class="body">Cross-joint structural reasoning</text>
+  <g transform="translate(960 690) scale(.72)">
+    <circle cx="50" cy="10" r="8" class="joint"/>
+    <line x1="50" y1="20" x2="50" y2="75" class="bone"/>
+    <line x1="50" y1="35" x2="15" y2="55" class="bone"/>
+    <line x1="50" y1="35" x2="87" y2="55" class="bone"/>
+    <line x1="50" y1="75" x2="25" y2="118" class="bone"/>
+    <line x1="50" y1="75" x2="78" y2="118" class="bone"/>
+    <circle cx="50" cy="35" r="5" class="joint"/><circle cx="50" cy="75" r="5" class="joint"/>
+    <circle cx="15" cy="55" r="5" class="joint"/><circle cx="87" cy="55" r="5" class="joint"/>
+    <circle cx="25" cy="118" r="5" class="joint"/><circle cx="78" cy="118" r="5" class="joint"/>
+  </g>
+  <text x="1040" y="790" class="small">17 joint tokens + body topology</text>
+
+  <rect x="1185" y="620" width="285" height="190" class="soft-blue"/>
+  <text x="1205" y="648" class="label">3D regression head</text>
+  <text x="1205" y="674" class="body">LayerNorm + linear projection</text>
+  <text x="1205" y="706" class="math">P = {x<tspan baseline-shift="sub">j</tspan>, y<tspan baseline-shift="sub">j</tspan>, z<tspan baseline-shift="sub">j</tspan>}<tspan baseline-shift="sub">j=1..17</tspan></text>
+  <rect x="1210" y="736" width="235" height="46" rx="6" fill="#ffffff" stroke="#78a6dc"/>
+  <text x="1327" y="755" text-anchor="middle" class="tiny">No triangulation post-process</text>
+  <text x="1327" y="771" text-anchor="middle" class="tiny">No camera-specific parameters</text>
+
+  <!-- Column 4: output -->
+  <rect x="1530" y="110" width="225" height="750" class="panel" filter="url(#shadow)"/>
+  <rect x="1530" y="110" width="225" height="48" rx="10" fill="#f2eafa"/>
+  <text x="1642" y="140" text-anchor="middle" class="section">4. Output</text>
+  <path d="M1500 715 L1530 715" class="arrow-blue"/>
+
+  <text x="1642" y="194" text-anchor="middle" class="label">Metric 3D pose</text>
+  <g transform="translate(1570 225)">
+    <ellipse cx="72" cy="240" rx="78" ry="18" fill="#e6eaf1"/>
+    <circle cx="72" cy="18" r="13" fill="#ffffff" stroke="#8b76ba" stroke-width="4"/>
+    <line x1="72" y1="32" x2="76" y2="116" stroke="#8b76ba" stroke-width="7"/>
+    <line x1="74" y1="51" x2="24" y2="90" stroke="#397dc0" stroke-width="7"/>
+    <line x1="74" y1="51" x2="129" y2="79" stroke="#d66b70" stroke-width="7"/>
+    <line x1="76" y1="116" x2="38" y2="205" stroke="#278b76" stroke-width="8"/>
+    <line x1="76" y1="116" x2="118" y2="202" stroke="#dd9250" stroke-width="8"/>
+    <circle cx="74" cy="51" r="7" fill="#ffffff" stroke="#34455f" stroke-width="3"/>
+    <circle cx="76" cy="116" r="7" fill="#ffffff" stroke="#34455f" stroke-width="3"/>
+    <circle cx="24" cy="90" r="7" fill="#ffffff" stroke="#397dc0" stroke-width="3"/>
+    <circle cx="129" cy="79" r="7" fill="#ffffff" stroke="#d66b70" stroke-width="3"/>
+    <circle cx="38" cy="205" r="7" fill="#ffffff" stroke="#278b76" stroke-width="3"/>
+    <circle cx="118" cy="202" r="7" fill="#ffffff" stroke="#dd9250" stroke-width="3"/>
+  </g>
+
+  <rect x="1555" y="515" width="175" height="118" class="soft-teal"/>
+  <text x="1642" y="542" text-anchor="middle" class="label">Robustness target</text>
+  <text x="1642" y="568" text-anchor="middle" class="body">all camera combinations</text>
+  <text x="1642" y="592" text-anchor="middle" class="mono">V2: 10 / 10</text>
+  <text x="1642" y="612" text-anchor="middle" class="mono">V3: 10 / 10</text>
+  <text x="1642" y="629" text-anchor="middle" class="mono">V4: 5 / 5</text>
+
+  <rect x="1555" y="660" width="175" height="138" class="soft-orange"/>
+  <text x="1642" y="688" text-anchor="middle" class="label">Evaluation</text>
+  <text x="1642" y="716" text-anchor="middle" class="body">MPJPE</text>
+  <text x="1642" y="740" text-anchor="middle" class="body">improved ratio</text>
+  <text x="1642" y="764" text-anchor="middle" class="body">worst-case delta</text>
+  <text x="1642" y="788" text-anchor="middle" class="body">attention maps</text>
+
+  <!-- Inference strip -->
+  <rect x="45" y="890" width="1710" height="115" rx="12" fill="#172033"/>
+  <text x="75" y="925" style="font:700 17px Arial; fill:#ffffff;">Inference path</text>
+  <text x="75" y="951" style="font:400 13px Arial; fill:#bfcbe0;">Any K calibrated views</text>
+  <path d="M260 947 L410 947" stroke="#ffffff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <rect x="420" y="916" width="250" height="61" rx="8" fill="#263552" stroke="#78a6dc"/>
+  <text x="545" y="941" text-anchor="middle" style="font:700 13px Arial; fill:#ffffff;">Ray tokenizer</text>
+  <text x="545" y="960" text-anchor="middle" style="font:400 11px Arial; fill:#bfcbe0;">origin + direction + confidence</text>
+  <path d="M670 947 L810 947" stroke="#ffffff" stroke-width="2" marker-end="url(#arrowTeal)"/>
+  <rect x="820" y="916" width="390" height="61" rx="8" fill="#1f554e" stroke="#62c2ae"/>
+  <text x="1015" y="941" text-anchor="middle" style="font:700 13px Arial; fill:#ffffff;">Learnable-biased VFT + Pose Fusion Transformer</text>
+  <text x="1015" y="960" text-anchor="middle" style="font:400 11px Arial; fill:#c4e8e1;">one checkpoint, one forward pass</text>
+  <path d="M1210 947 L1350 947" stroke="#ffffff" stroke-width="2" marker-end="url(#arrowOrange)"/>
+  <rect x="1360" y="916" width="250" height="61" rx="8" fill="#5d422c" stroke="#dd9250"/>
+  <text x="1485" y="941" text-anchor="middle" style="font:700 13px Arial; fill:#ffffff;">3D pose</text>
+  <text x="1485" y="960" text-anchor="middle" style="font:400 11px Arial; fill:#f2d8c1;">no teacher, no ensemble</text>
+  <text x="1730" y="930" text-anchor="end" style="font:700 11px Arial; fill:#78a6dc;">TRAIN</text>
+  <text x="1730" y="951" text-anchor="end" style="font:700 11px Arial; fill:#62c2ae;">FUSION</text>
+  <text x="1730" y="972" text-anchor="end" style="font:700 11px Arial; fill:#dd9250;">OUTPUT</text>
+</svg>

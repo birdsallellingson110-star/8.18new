@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GPU=${1:-0}
+PY=/home/lixiaob/cjy/rumpl_venv310/bin/python
+AUDIT=/home/lixiaob/cjy/OpenRUMPL_baseline_audit
+DATA=/mnt/data/cjydata/datasets/h36m_rumpl_official/prepared/h36m/data
+ROOT=/mnt/data/cjyoutput/open_source_fusion_audit_20260731
+OUTPUT=${ROOT}/H24_validation_gt_oracle_scale_diagnostic
+H21=${ROOT}/H21_pose_query_v2focus_reg005/final.pth
+H24_GATE=${ROOT}/H24_learned_anchor_gate/final.pth
+H22_EVAL=/mnt/data/cjyoutput/h36m_original_rumpl_tri_anchor_20260731/eval/H20_H22_CUR_originalRUMPL_triAnchor_fixedK2First8_thenWeighted3to1to1_clean_realH36M_seed0_20260731
+
+mkdir -p "${OUTPUT}"
+export CUDA_VISIBLE_DEVICES="${GPU}"
+export PYTHONPATH="${AUDIT}"
+if [[ ! -s "${OUTPUT}/full_eval.json" ]]; then
+  "${PY}" -u "${AUDIT}/eval_h23_rumpl_pose_query_anchor.py" \
+    --input-pkl \
+      "${DATA}/datasets/annot_filtered_5_64/h36m_validation.pkl" \
+    --rumpl-input-pkl \
+      "${DATA}/datasets_mmpose/annot_filtered_5_64_mmpose_hrnet_coco_inferencer_legswap/h36m_validation.pkl" \
+    --dense-shards "${ROOT}/A0_h36m_val_heatmap_topk8"/shard{0..3}.npz \
+    --checkpoint "${H21}" \
+    --gate-checkpoint "${H24_GATE}" \
+    --prediction-root "${H22_EVAL}" \
+    --views 2 3 4 \
+    --query-sources old_anchor \
+    --anchor-delta-scales 0.25 \
+    --report-oracle-diagnostics \
+    --device cuda:0 \
+    --output "${OUTPUT}/full_eval.json" \
+    >"${OUTPUT}/full_eval.log" 2>&1
+fi
+
+echo "[H24 oracle diagnostic] complete $(date --iso-8601=seconds)"

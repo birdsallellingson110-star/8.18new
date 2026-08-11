@@ -1,0 +1,40 @@
+# Local env / secrets (do not upload)
+rumpl_venv310/
+.secrets/
+**/.venv/
+**/venv/
+tools/baidu_qr_venv/
+
+# Model checkpoints / large binaries
+*.pth
+*.pth.tar
+*.ckpt
+*.pt
+*.onnx
+*.h5
+*.AppImage
+*.deb
+
+# Python / IDE
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/
+*.swp
+
+# Logs and local agent state
+*.log
+.agents/
+.claude/
+.codex/
+
+# Nested git metadata (kept locally, not uploaded)
+**/.git.bak_upload/
+**/.git/
+
+# OS
+.DS_Store
+Thumbs.db

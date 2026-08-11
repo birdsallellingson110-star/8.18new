@@ -1,0 +1,18 @@
+/home/lixiaob/cjy/rumpl_venv310/lib/python3.10/site-packages/timm/models/helpers.py:7: FutureWarning: Importing from timm.models.helpers is deprecated, please import via timm.models
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/home/lixiaob/cjy/rumpl_venv310/lib/python3.10/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/home/lixiaob/cjy/rumpl_venv310/lib/python3.10/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.models
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/home/lixiaob/cjy/rumpl_venv310/lib/python3.10/site-packages/torch/nn/modules/transformer.py:282: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  warnings.warn(f"enable_nested_tensor is True, but self.use_nested_tensor is False because {why_not_sparsity_fast_path}")
+{'NAME': 'multiview_mpl', 'INIT_WEIGHTS': True, 'PRETRAINED': '', 'NUM_JOINTS': 17, 'TAG_PER_JOINT': True, 'TARGET_TYPE': 'gaussian', 'IMAGE_SIZE': array([1920, 1080]), 'IMAGE_SIZE_TRAIN': None, 'IMAGE_SIZE_TEST': None, 'HEATMAP_SIZE': array([64, 64]), 'PATCH_SIZE': [4, 4], 'SIGMA': 2, 'HIDDEN_HEATMAP_DIM': -1, 'TRANSFORMER_DEPTH': 12, 'TRANSFORMER_HEADS': 8, 'TRANSFORMER_MLP_RATIO': 3, 'POS_EMBEDDING_TYPE': 'sine-full', 'DIM': 256, 'MULTI_TRANSFORMER_DEPTH': [12, 12], 'MULTI_TRANSFORMER_HEADS': [16, 16], 'MULTI_DIM': [48, 48], 'INIT': True, 'NUM_BRANCHES': 1, 'BASEconfigHANNEL': 32, 'EXTRA': {}, 'NO_VISUAL_TOKEN_FUSION': False, 'POSE_3D_EMB_LEARNABLE': True, 'POSEFORMER_DROP_RATE': 0, 'POSEFORMER_ATTN_DROP_RATE': 0, 'POSEFORMER_DROP_PATH_RATE': 0.1, 'POSEFORMER_ADD_CONFIDENCE_INPUT': False, 'POSEFORMER_MULT_CONFIDENCE_EMB': False, 'POSEFORMER_CONCAT_CONFIDENCE_EMB': True, 'POSEFORMER_CONFIDENCE_INPUT_AS_THIRD': True, 'POSEFORMER_LINEAR_WEIGHTED_MEAN': False, 'POSEFORMER_ADD_3D_POS_ENCODING_IN_SPATIAL': False, 'POSEFORMER_INPUT_RAYS_AS_TOKEN': True, 'POSEFORMER_ADD_3D_POS_ENCODING_TO_RAYS': True, 'POSEFORMER_CONF_ATTENTION_UNCERTAINTY_WEIGHT': False, 'POSEFORMER_MULTIPLE_SPATIAL_BLOCKS': True, 'POSEFORMER_NO_TRANSFORMER_SPT': False, 'POSEFORMER_NO_TRANSFORMER_FPT': False, 'POSEFORMER_CONFIDENCE_IN_FPT': False, 'POSEFORMER_OUTPUT_HEAD_DEEP': False, 'POSEFORMER_OUTPUT_HEAD_KADKHOD': False, 'POSEFORMER_OUTPUT_HEAD_HIDDEN_DIM': 1024, 'POSEFORMER_FPT_BLOCKS_VIEW_KEYPOINT_TOKENS': False, 'POSEFORMER_RAY_TOKENS_AS_ONLY_INPUT': False, 'POSEFORMER_LEARNED_QUERY_FPT': False, 'CONCAT_CAM_CENTER_TO_INPUTS': False, 'CONCAT_CAM_AXIS_TO_RAYS': False, 'EMBED_PERSON_HEIGHT': False, 'INIT_WEIGHTS_FROM': 'scratch', 'MODEL_SIMPLE_DEEPER': False, 'MODEL_SIMPLE_KADKHODA': False, 'SIMPLE_MLP_HIDDEN_SIZE': 1024, 'POSE_3D_FUSER_USE_MIDDLE_POINTS': False, 'APPLY_VIEW_FUSION': True, 'ADD_VIEW_ENCODING': True, 'POSE_3D_FUSER_CONCAT_DIRECTION_INTERSECTION_FIRST': False, 'FEED_CAMERA_CALIBRATION': False, 'FEED_ONLY_2D': False, 'CONCAT_DEPTH_AS_INPUT': False, 'NOT_USE_INTERSECTION_FEATURES': False}
+[STVFTClipDataset] min_oks=0.5: 丢弃 101 个检测崩的clip, 留 2899
+gate=0(baseline): mean=58.6 median=29.1
+gate=0.23(学到):  mean=52.6 median=31.5  vs base mean +6.0
+gate=1(满接入):   mean=96.1 median=75.9  vs base mean -37.5
+按 baseline 难度分层 (gate=1 vs baseline):
+  易<20: n= 52 base均=  16.3 → gate1=  89.1 增益= -72.8
+  中20-50: n= 90 base均=  31.3 → gate1=  87.1 增益= -55.8
+  难>50: n= 58 base均= 138.8 → gate1= 116.3 增益= +22.5
+DONE

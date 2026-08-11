@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=/home/lixiaob/cjy/OpenRUMPL_baseline_audit
+cd "$repo"
+
+env \
+  RUMPL_GLOBAL_JOINT_VIEW_FUSION=1 \
+  RUMPL_GLOBAL_JOINT_VIEW_DEPTH=2 \
+  RUMPL_GLOBAL_JOINT_VIEW_CONF_BIAS=1 \
+  RUMPL_GLOBAL_JOINT_VIEW_GEOM_BIAS=1 \
+  RUMPL_GLOBAL_JOINT_VIEW_GATE_INIT=0.1 \
+  GBT_LEARNABLE_BIAS=0 \
+  GBT_LEARNED_RELIABILITY=0 \
+  "$repo/run_official_like_cmu_seed0_20260722.sh" \
+  1 J0b_globalJV_d2_confgeom_g01_seed0_20260723 0 1 16
+
+env \
+  RUMPL_GLOBAL_JOINT_VIEW_FUSION=1 \
+  RUMPL_GLOBAL_JOINT_VIEW_DEPTH=2 \
+  RUMPL_GLOBAL_JOINT_VIEW_CONF_BIAS=0 \
+  RUMPL_GLOBAL_JOINT_VIEW_GEOM_BIAS=0 \
+  RUMPL_GLOBAL_JOINT_VIEW_GATE_INIT=0.1 \
+  GBT_LEARNABLE_BIAS=0 \
+  GBT_LEARNED_RELIABILITY=0 \
+  "$repo/run_official_like_cmu_seed0_20260722.sh" \
+  1 J1b_globalJV_d2_nobias_g01_seed0_20260723 0 1 16

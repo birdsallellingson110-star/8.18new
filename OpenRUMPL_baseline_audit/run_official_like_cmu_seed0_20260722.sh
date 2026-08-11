@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+gpu=${1:?usage: $0 GPU VARIANT [FIX_PFT_LAST_BLOCK] [FIX_SCHEDULER_ORDER] [WORKERS] [CONFIG]}
+variant=${2:?usage: $0 GPU VARIANT [FIX_PFT_LAST_BLOCK] [FIX_SCHEDULER_ORDER] [WORKERS] [CONFIG]}
+fix_pft_last_block=${3:-0}
+fix_scheduler_order=${4:-0}
+workers=${5:-4}
+cfg=${6:-RUMPL/configs/cmu_panoptic/rumpl_amass/crf_4925_random_mmpose_hrnet_ConfConcat_2viewsV3V6_Seed0_RaySineEncNo_IntersectM_Miss20_ZrTknsNo_FuserRays_RNV5.yaml}
+
+if [[ "$fix_pft_last_block" != "0" && "$fix_pft_last_block" != "1" ]]; then
+  echo "FIX_PFT_LAST_BLOCK must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$fix_scheduler_order" != "0" && "$fix_scheduler_order" != "1" ]]; then
+  echo "FIX_SCHEDULER_ORDER must be 0 or 1" >&2
+  exit 2
+fi
+if [[ ! "$workers" =~ ^[1-9][0-9]*$ ]]; then
+  echo "WORKERS must be a positive integer" >&2
+  exit 2
+fi
+
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES="$gpu"
+export RUMPL_FIX_PFT_LAST_BLOCK="$fix_pft_last_block"
+export RUMPL_FIX_SCHEDULER_ORDER="$fix_scheduler_order"
+export GBT_LEARNABLE_BIAS=${GBT_LEARNABLE_BIAS:-0}
+export GBT_USE_CONF_BIAS=${GBT_USE_CONF_BIAS:-1}
+export GBT_USE_GEOM_BIAS=${GBT_USE_GEOM_BIAS:-1}
+export GBT_CONF_INIT=${GBT_CONF_INIT:-0.1}
+export GBT_GEOM_INIT=${GBT_GEOM_INIT:-0.1}
+export GBT_FUSION_GEOM=${GBT_FUSION_GEOM:-0}
+export RUMPL_GLOBAL_JOINT_VIEW_FUSION=${RUMPL_GLOBAL_JOINT_VIEW_FUSION:-0}
+export RUMPL_GLOBAL_JOINT_VIEW_DEPTH=${RUMPL_GLOBAL_JOINT_VIEW_DEPTH:-2}
+export RUMPL_GLOBAL_JOINT_VIEW_CONF_BIAS=${RUMPL_GLOBAL_JOINT_VIEW_CONF_BIAS:-1}
+export RUMPL_GLOBAL_JOINT_VIEW_GEOM_BIAS=${RUMPL_GLOBAL_JOINT_VIEW_GEOM_BIAS:-1}
+export RUMPL_GLOBAL_JOINT_VIEW_GEOM_NORM=${RUMPL_GLOBAL_JOINT_VIEW_GEOM_NORM:-0}
+export RUMPL_GLOBAL_JOINT_VIEW_GATE_INIT=${RUMPL_GLOBAL_JOINT_VIEW_GATE_INIT:-0.1}
+export RUMPL_GLOBAL_JOINT_VIEW_COUNT_GATE=${RUMPL_GLOBAL_JOINT_VIEW_COUNT_GATE:-0}
+export RUMPL_GLOBAL_JOINT_VIEW_GATE_MAX_INIT=${RUMPL_GLOBAL_JOINT_VIEW_GATE_MAX_INIT:-0.12}
+export RUMPL_GLOBAL_JOINT_VIEW_RESIDUAL=${RUMPL_GLOBAL_JOINT_VIEW_RESIDUAL:-0}
+export RUMPL_GLOBAL_JOINT_VIEW_PLUCKER=${RUMPL_GLOBAL_JOINT_VIEW_PLUCKER:-0}
+export RUMPL_GLOBAL_ONLY=${RUMPL_GLOBAL_ONLY:-0}
+export RUMPL_JOINT_ADAPTER_COUNT_LOOKUP=${RUMPL_JOINT_ADAPTER_COUNT_LOOKUP:-0}
+export RUMPL_JOINT_ADAPTER_DIRECT_READOUT=${RUMPL_JOINT_ADAPTER_DIRECT_READOUT:-0}
+export RUMPL_JOINT_ADAPTER_DIRECT_SCALE_INIT=${RUMPL_JOINT_ADAPTER_DIRECT_SCALE_INIT:-0.1}
+export RUMPL_SAVE_EPOCH_STATES=${RUMPL_SAVE_EPOCH_STATES:-0}
+export RUMPL_SINGLEFRAME_GBT=${RUMPL_SINGLEFRAME_GBT:-0}
+export RUMPL_SF_GBT_ENCODER_DEPTH=${RUMPL_SF_GBT_ENCODER_DEPTH:-3}
+export RUMPL_SF_GBT_DECODER_DEPTH=${RUMPL_SF_GBT_DECODER_DEPTH:-2}
+export RUMPL_SF_GBT_PFT_DEPTH=${RUMPL_SF_GBT_PFT_DEPTH:-4}
+export RUMPL_SF_GBT_CONF_BIAS=${RUMPL_SF_GBT_CONF_BIAS:-1}
+export RUMPL_SF_GBT_GEOM_BIAS=${RUMPL_SF_GBT_GEOM_BIAS:-1}
+export RUMPL_SF_GBT_GEOM_NORM=${RUMPL_SF_GBT_GEOM_NORM:-1}
+export RUMPL_SYMMETRY_LOSS_WEIGHT=${RUMPL_SYMMETRY_LOSS_WEIGHT:-0.0}
+export PYTHONPATH=/home/lixiaob/cjy/OpenRUMPL_baseline_audit/RUMPL/lib
+export TORCH_HOME=/mnt/data/dataset/c2i/torch
+export XDG_CACHE_HOME=/mnt/data/cjydata/.cache
+export WANDB_MODE=disabled
+python=/home/lixiaob/cjy/rumpl_venv310/bin/python
+
+repo=/home/lixiaob/cjy/OpenRUMPL_baseline_audit
+run_dir=/mnt/data/cjyoutput/baseline_reaudit_20260722
+log="$run_dir/${variant}.log"
+snapshot_dir="$run_dir/snapshot/$variant"
+hash_manifest="$repo/baseline_input_sha256_20260722.txt"
+
+mkdir -p "$snapshot_dir"
+exec > >(tee -a "$log") 2>&1
+trap 'rc=$?; echo "FAILED line=$LINENO rc=$rc"; exit $rc' ERR
+
+echo "START $(date --iso-8601=seconds)"
+echo "HOST $(hostname)"
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "RUMPL_FIX_PFT_LAST_BLOCK=$RUMPL_FIX_PFT_LAST_BLOCK"
+echo "RUMPL_FIX_SCHEDULER_ORDER=$RUMPL_FIX_SCHEDULER_ORDER"
+echo "GBT_LEARNABLE_BIAS=$GBT_LEARNABLE_BIAS"
+echo "GBT_USE_CONF_BIAS=$GBT_USE_CONF_BIAS"
+echo "GBT_USE_GEOM_BIAS=$GBT_USE_GEOM_BIAS"
+echo "GBT_CONF_INIT=$GBT_CONF_INIT"
+echo "GBT_GEOM_INIT=$GBT_GEOM_INIT"
+echo "GBT_FUSION_GEOM=$GBT_FUSION_GEOM"
+echo "RUMPL_GLOBAL_JOINT_VIEW_FUSION=$RUMPL_GLOBAL_JOINT_VIEW_FUSION"
+echo "RUMPL_GLOBAL_JOINT_VIEW_DEPTH=$RUMPL_GLOBAL_JOINT_VIEW_DEPTH"
+echo "RUMPL_GLOBAL_JOINT_VIEW_CONF_BIAS=$RUMPL_GLOBAL_JOINT_VIEW_CONF_BIAS"
+echo "RUMPL_GLOBAL_JOINT_VIEW_GEOM_BIAS=$RUMPL_GLOBAL_JOINT_VIEW_GEOM_BIAS"
+echo "RUMPL_GLOBAL_JOINT_VIEW_GEOM_NORM=$RUMPL_GLOBAL_JOINT_VIEW_GEOM_NORM"
+echo "RUMPL_GLOBAL_JOINT_VIEW_GATE_INIT=$RUMPL_GLOBAL_JOINT_VIEW_GATE_INIT"
+echo "RUMPL_GLOBAL_JOINT_VIEW_COUNT_GATE=$RUMPL_GLOBAL_JOINT_VIEW_COUNT_GATE"
+echo "RUMPL_GLOBAL_JOINT_VIEW_GATE_MAX_INIT=$RUMPL_GLOBAL_JOINT_VIEW_GATE_MAX_INIT"
+echo "RUMPL_GLOBAL_JOINT_VIEW_RESIDUAL=$RUMPL_GLOBAL_JOINT_VIEW_RESIDUAL"
+echo "RUMPL_GLOBAL_JOINT_VIEW_PLUCKER=$RUMPL_GLOBAL_JOINT_VIEW_PLUCKER"
+echo "RUMPL_GLOBAL_ONLY=$RUMPL_GLOBAL_ONLY"
+echo "RUMPL_JOINT_ADAPTER_COUNT_LOOKUP=$RUMPL_JOINT_ADAPTER_COUNT_LOOKUP"
+echo "RUMPL_JOINT_ADAPTER_DIRECT_READOUT=$RUMPL_JOINT_ADAPTER_DIRECT_READOUT"
+echo "RUMPL_JOINT_ADAPTER_DIRECT_SCALE_INIT=$RUMPL_JOINT_ADAPTER_DIRECT_SCALE_INIT"
+echo "RUMPL_SAVE_EPOCH_STATES=$RUMPL_SAVE_EPOCH_STATES"
+echo "RUMPL_SINGLEFRAME_GBT=$RUMPL_SINGLEFRAME_GBT"
+echo "RUMPL_SF_GBT_ENCODER_DEPTH=$RUMPL_SF_GBT_ENCODER_DEPTH"
+echo "RUMPL_SF_GBT_DECODER_DEPTH=$RUMPL_SF_GBT_DECODER_DEPTH"
+echo "RUMPL_SF_GBT_PFT_DEPTH=$RUMPL_SF_GBT_PFT_DEPTH"
+echo "RUMPL_SF_GBT_CONF_BIAS=$RUMPL_SF_GBT_CONF_BIAS"
+echo "RUMPL_SF_GBT_GEOM_BIAS=$RUMPL_SF_GBT_GEOM_BIAS"
+echo "RUMPL_SF_GBT_GEOM_NORM=$RUMPL_SF_GBT_GEOM_NORM"
+echo "RUMPL_SYMMETRY_LOSS_WEIGHT=$RUMPL_SYMMETRY_LOSS_WEIGHT"
+echo "WORKERS=$workers"
+git -C "$repo" rev-parse HEAD
+git -C "$repo" status --short
+git -C "$repo" diff -- "$cfg" RUMPL/lib/models/multiview_rumpl.py
+sha256sum "$repo/$cfg"
+cat "$hash_manifest"
+cp "$repo/$cfg" "$snapshot_dir/config.yaml"
+cp "$repo/RUMPL/lib/models/multiview_rumpl.py" "$snapshot_dir/multiview_rumpl.py"
+cp "$repo/RUMPL/lib/core/function_rumpl.py" "$snapshot_dir/function_rumpl.py"
+git -C "$repo" diff > "$snapshot_dir/worktree.diff"
+cp "$hash_manifest" "$snapshot_dir/input_sha256.txt"
+
+cd "$repo/RUMPL"
+train_args=(
+  run/train_rumpl.py
+  --cfg "../$cfg"
+  --gpus 0
+  --workers "$workers"
+  --exp-name "$variant"
+)
+if [[ -n "${RUMPL_TRAIN_LR:-}" ]]; then
+  train_args+=(--lr "$RUMPL_TRAIN_LR")
+fi
+"$python" "${train_args[@]}"
+
+echo "END $(date --iso-8601=seconds)"

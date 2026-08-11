@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+repo=/home/lixiaob/cjy/OpenRUMPL_baseline_audit
+run_root=/mnt/data/cjyoutput/baseline_reaudit_20260722
+output_root="$run_root/output/multiview_amass_rumpl/multiview_rumpl_999"
+python=/home/lixiaob/cjy/rumpl_venv310/bin/python
+cfg=../RUMPL/configs/cmu_panoptic/rumpl_amass/crf_4925_random_mmpose_hrnet_ConfConcat_2viewsV3V6_Seed0_RaySineEncNo_IntersectM_Miss20_ZrTknsNo_FuserRays_RNV5.yaml
+log="$run_root/watch_gbt_ablation_20260723.log"
+
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0
+export PYTHONPATH="$repo/RUMPL/lib"
+export TORCH_HOME=/mnt/data/dataset/c2i/torch XDG_CACHE_HOME=/mnt/data/cjydata/.cache WANDB_MODE=disabled
+export RUMPL_FIX_PFT_LAST_BLOCK=0 RUMPL_FIX_SCHEDULER_ORDER=1
+export GBT_LEARNABLE_BIAS=1 GBT_CONF_INIT=0.1 GBT_GEOM_INIT=0.1
+
+exec > >(tee -a "$log") 2>&1
+echo "WATCH_START $(date --iso-8601=seconds)"
+while tmux has-session -t rumpl_gbt_conf_ablation_20260723 2>/dev/null || \
+      tmux has-session -t rumpl_gbt_geom_ablation_20260723 2>/dev/null; do
+  echo "WAIT $(date --iso-8601=seconds)"
+  sleep 60
+done
+
+status=0
+for spec in \
+  "G2_gbt_conf_only_exact_seed0_20260723:1:0:0:conf_only" \
+  "G3_gbt_geom_fusion_only_exact_seed0_20260723:0:1:1:geom_fusion_only"; do
+  IFS=: read -r variant use_conf use_geom fusion_geom tag <<< "$spec"
+  output_dir=$(find "$output_root" -maxdepth 1 -type d -name "${variant}_*" -print | sort | tail -n 1)
+  epoch=$(cat "$output_dir/epoch.txt" 2>/dev/null || true)
+  if [[ -z "$output_dir" || "$epoch" != "20" || ! -f "$output_dir/model_best.pth.tar" ]]; then
+    echo "ERROR $variant incomplete output=${output_dir:-missing} epoch=${epoch:-missing}"
+    status=1
+    continue
+  fi
+
+  "$python" "$repo/RUMPL/run/summarize_cmu_predictions.py" \
+    "$output_dir/preds_gt_multiview_cmu_panoptic_rumpl_mmpose__dict.pkl" \
+    --output-json "$run_root/${variant}_final_epoch20_summary.json" || status=1
+
+  export GBT_USE_CONF_BIAS="$use_conf" GBT_USE_GEOM_BIAS="$use_geom" GBT_FUSION_GEOM="$fusion_geom"
+  eval_root="$run_root/model_best_eval/$tag"
+  mkdir -p "$eval_root" "$run_root/model_best_eval/log_$tag"
+  (
+    cd "$repo/RUMPL" || exit 1
+    "$python" run/valid_rumpl.py --cfg "$cfg" --gpus 0 --workers 16 \
+      --model-file "$output_dir/model_best.pth.tar" \
+      --modelDir "$eval_root" --logDir "$run_root/model_best_eval/log_$tag" \
+      --state "best_$tag" --eval-comments "exact_best_$tag" --use-mmpose-val
+  ) > "$run_root/${variant}_model_best_eval.log" 2>&1 || {
+    echo "ERROR $variant model_best evaluation failed"
+    status=1
+    continue
+  }
+  best_prediction=$(find "$eval_root" -type f -name '*_dict.pkl' -print | sort | tail -n 1)
+  "$python" "$repo/RUMPL/run/summarize_cmu_predictions.py" "$best_prediction" \
+    --output-json "$run_root/${variant}_model_best_summary.json" || status=1
+done
+echo "WATCH_END $(date --iso-8601=seconds) status=$status"
+exit "$status"
