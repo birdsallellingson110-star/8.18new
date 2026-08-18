@@ -183,6 +183,17 @@ def reset_config(config, args):
         config.DATASET.TRAIN_MMPOSE_TYPE = args.train_mmpose_type
     if args.test_mmpose_type:
         config.DATASET.TEST_MMPOSE_TYPE = args.test_mmpose_type
+    flip_lower_body_test = os.environ.get(
+        'RUMPL_FLIP_LOWER_BODY_KP_TEST', ''
+    ).strip()
+    if flip_lower_body_test:
+        if flip_lower_body_test not in ('0', '1'):
+            raise ValueError(
+                'RUMPL_FLIP_LOWER_BODY_KP_TEST must be 0 or 1'
+            )
+        config.DATASET.FLIP_LOWER_BODY_KP_TEST = bool(
+            int(flip_lower_body_test)
+        )
     if type(args.normalize_cameras) == int:
         config.DATASET.NORMALIZE_CAMERAS = bool(args.normalize_cameras)
     if type(args.normalize_room) == int:
@@ -223,6 +234,14 @@ def reset_config(config, args):
     end_epoch = os.environ.get('RUMPL_END_EPOCH', '').strip()
     if end_epoch:
         config.TRAIN.END_EPOCH = int(end_epoch)
+    lr_steps = os.environ.get('RUMPL_LR_STEPS', '').strip()
+    if lr_steps:
+        try:
+            config.TRAIN.LR_STEP = [int(item.strip()) for item in lr_steps.split(',') if item.strip()]
+        except ValueError as exc:
+            raise ValueError(
+                'RUMPL_LR_STEPS must be a comma-separated list of integer epochs'
+            ) from exc
 
 
 def apply_train_scope(model, scope):
@@ -270,6 +289,12 @@ def apply_train_scope(model, scope):
         ),
         'per_joint_residual_gate': (
             'residual_joint_gate',
+        ),
+        'gbt_query_residual': (
+            'gbt_query_residual',
+            'gbt_query_joint_queries',
+            'gbt_query_joint_memory_embed',
+            'gbt_query_anchor_embed',
         ),
     }
     if scope not in scope_markers:
@@ -320,6 +345,17 @@ def update_config_file(conf, args):
         conf["DATASET"]["TRAIN_MMPOSE_TYPE"] = args.train_mmpose_type
     if args.test_mmpose_type:
         conf["DATASET"]["TEST_MMPOSE_TYPE"] = args.test_mmpose_type
+    flip_lower_body_test = os.environ.get(
+        'RUMPL_FLIP_LOWER_BODY_KP_TEST', ''
+    ).strip()
+    if flip_lower_body_test:
+        if flip_lower_body_test not in ('0', '1'):
+            raise ValueError(
+                'RUMPL_FLIP_LOWER_BODY_KP_TEST must be 0 or 1'
+            )
+        conf["DATASET"]["FLIP_LOWER_BODY_KP_TEST"] = bool(
+            int(flip_lower_body_test)
+        )
     if type(args.normalize_cameras) == int:
         conf["DATASET"]["NORMALIZE_CAMERAS"] = bool(args.normalize_cameras)
     if type(args.normalize_room) == int:

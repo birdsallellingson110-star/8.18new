@@ -213,3 +213,20 @@ VFT 已经完成同关节跨视角融合后处理 17 个 joint。它完整替换
 
 两组启动器会在20轮结束后自动执行严格 V2/V3/V4 Table-2，并写入上述输出根
 目录的 `eval/`、`checkpoints/` 和 `completed/`。
+
+### GF-M0/GF-M1 最终严格结果（2026-08-11 补录）
+
+| 方法 | V2 | V3 | V4 | 相对 H76（V2/V3/V4） |
+|---|---:|---:|---:|---:|
+| H76 baseline | 34.8163 | 30.4890 | 29.6913 | — |
+| GF-M0 GraAttention/model-AT | 42.3116 | 37.2964 | 34.7511 | +7.4953 / +6.8074 / +5.0598 |
+| GF-M1 full GraFormer | 45.0645 | 35.9863 | 34.9645 | +10.2482 / +5.4973 / +5.2732 |
+
+两种完整 PFT 替换均正常完成训练但显著退化。GF-M1 没有稳定优于 GF-M0，且
+两者都远差于原 RUMPL PFT。因此“用单视角 2D-to-3D 的 GraFormer 关节建模完整
+替换 RUMPL PFT”判定失败，不做参数搜索或多种子。SGraFormer pre-VFT 与
+GraFormer post-VFT/PFT 两个论文结构方向至此均已严谨排除；后续转向保留 H76
+融合器、在其输出的多视角子集假设上学习评分，而不是继续替换主干。
+
+严格结果目录：
+`/mnt/data/cjyoutput/open_source_fusion_audit_20260731/GraFormer_PFT_20260809`

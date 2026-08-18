@@ -532,3 +532,11 @@ GF-M0/GF-M1 单元测试、完整前反向、有限梯度和 view permutation �
 共同参数同 seed 最大差为0。GPU0/GPU1 已分别进入 epoch 0；严格 V2/V3/V4 将
 由启动器在训练完成后自动执行。详细结构与输出位置见
 `PAPER_BACKED_MODEL_INNOVATION_PLAN_20260809.md` 第8节。
+
+### GraFormer PFT 最终结论（2026-08-11 补录）
+
+GF-M0 最终为 `42.3116/37.2964/34.7511` mm，GF-M1 为
+`45.0645/35.9863/34.9645` mm；相比 H76 三种视角全部显著退化。两者训练、
+评估和模块激活均正常，因此结论是结构/任务失配而非未收敛：GraFormer 的
+单视角 2D-to-3D 骨架编码不能直接替代 RUMPL 在 world-ray 条件下形成的 PFT。
+该路线停止，不调参、不补 seed。

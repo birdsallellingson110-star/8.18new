@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from dense_geometry_residual_fusion import DenseGeometryResidualFusion
+from adafuse_style_heatmap_fusion import AdaFuseStyleHeatmapFusion
 from eval_h36m_dense_epipolar_heatmaps import (
     DenseHeatmapStore,
     epipolar_support,
@@ -42,6 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-min-m", type=float, default=1.0)
     parser.add_argument("--depth-max-m", type=float, default=10.0)
     parser.add_argument("--depth-samples", type=int, default=32)
+    parser.add_argument(
+        "--support-mode", choices=("depth", "line"), default="depth"
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--hard-case-scale", type=float, default=8.0)
@@ -59,6 +63,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=25)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--resume")
+    parser.add_argument(
+        "--model-kind",
+        choices=("a1d", "adafuse_style"),
+        default="a1d",
+        help="Fusion module. The default keeps the historical A1D path.",
+    )
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args()
 
@@ -155,7 +165,7 @@ def bilinear_coordinate_nll(
 
 
 def checkpoint_payload(
-    model: DenseGeometryResidualFusion,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     step: int,
     args: argparse.Namespace,
@@ -165,6 +175,7 @@ def checkpoint_payload(
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "args": vars(args),
+        "model_kind": args.model_kind,
         "direct_coco_joints": DIRECT_COCO.tolist(),
         "direct_h36m_joints": DIRECT_H36M.tolist(),
     }
@@ -198,7 +209,10 @@ def main() -> None:
     ]
     if not groups:
         raise RuntimeError("dense shards contain no complete training groups")
-    model = DenseGeometryResidualFusion().to(device)
+    if args.model_kind == "adafuse_style":
+        model = AdaFuseStyleHeatmapFusion().to(device)
+    else:
+        model = DenseGeometryResidualFusion().to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
@@ -257,6 +271,7 @@ def main() -> None:
                     data["input_center"],
                     data["input_scale"],
                     depths,
+                    mode=args.support_mode,
                 )
 
             logits, auxiliary = model(
@@ -289,8 +304,9 @@ def main() -> None:
             )
             # Keep the identity residual small unless supervision supports a
             # change; this is especially important for already-good V3/V4.
-            residual_penalty = auxiliary["spatial_residual"].square().mean()
-            loss = loss + 1e-4 * residual_penalty
+            if "spatial_residual" in auxiliary:
+                residual_penalty = auxiliary["spatial_residual"].square().mean()
+                loss = loss + 1e-4 * residual_penalty
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             gradient_norm = torch.nn.utils.clip_grad_norm_(
@@ -299,16 +315,23 @@ def main() -> None:
             optimizer.step()
 
             if step % args.log_every == 0 or step == first_step:
+                weight_tensor = (
+                    auxiliary["geometry_weight"]
+                    if "geometry_weight" in auxiliary
+                    else auxiliary["view_weights"]
+                )
                 row = {
                     "step": step,
                     "views": n_views,
                     **metrics,
                     "total_loss": float(loss.detach()),
-                    "mean_geometry_weight": float(
-                        auxiliary["geometry_weight"].detach().mean()
-                    ),
+                    "mean_geometry_weight": float(weight_tensor.detach().mean()),
                     "global_geometry_strength": float(
-                        model.global_geometry_strength.detach()
+                        getattr(
+                            model,
+                            "global_geometry_strength",
+                            torch.zeros((), device=device),
+                        ).detach()
                     ),
                     "gradient_norm": float(gradient_norm),
                     "elapsed_seconds": time.time() - started,

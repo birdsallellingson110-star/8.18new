@@ -26,6 +26,77 @@ from models.multiview_rumpl import Block, pairwise_ray_distance
 from models.stvft.delta_t_encoder import DeltaTEncoder
 
 
+class PreVFTTemporalAdapter(nn.Module):
+    """Temporal attention on each joint/camera ray track before VFT.
+
+    The old ``mixste-*`` modes apply temporal attention after RUMPL has
+    already pooled the camera axis.  This adapter deliberately keeps the
+    ``(joint, view)`` identity and only mixes the time axis.  It is therefore
+    permutation equivariant in camera order and can be used with variable K.
+    Its output projection is zero initialized, so construction is an exact
+    identity around a pretrained RUMPL checkpoint.
+    """
+
+    def __init__(self, dim: int, num_heads: int, depth: int, temporal_length: int):
+        super().__init__()
+        if depth < 1:
+            raise ValueError("pre-vft temporal depth must be positive")
+        if dim % num_heads:
+            raise ValueError(
+                f"temporal token dimension {dim} is not divisible by {num_heads} heads"
+            )
+        self.temporal_pos_embed = nn.Parameter(
+            torch.zeros(1, temporal_length, dim)
+        )
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    dim=dim,
+                    num_heads=num_heads,
+                    mlp_ratio=2.0,
+                    qkv_bias=True,
+                    drop=0.0,
+                    attn_drop=0.0,
+                    drop_path=0.0,
+                )
+                for _ in range(depth)
+            ]
+        )
+        self.norm = nn.LayerNorm(dim)
+        self.output = nn.Linear(dim, dim)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def _position(self, time: int) -> torch.Tensor:
+        position = self.temporal_pos_embed
+        if position.shape[1] != time:
+            position = F.interpolate(
+                position.transpose(1, 2),
+                size=time,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+        return position
+
+    def forward(self, token: torch.Tensor) -> torch.Tensor:
+        if token.ndim != 5:
+            raise ValueError(
+                f"pre-vft temporal adapter expects (B,T,J,V,D), got {tuple(token.shape)}"
+            )
+        batch, time, joints, views, dim = token.shape
+        track = token.permute(0, 2, 3, 1, 4).reshape(
+            batch * joints * views, time, dim
+        )
+        track = track + self._position(time)
+        for block in self.blocks:
+            track = block(track)
+        delta = self.output(self.norm(track))
+        delta = delta.reshape(batch, joints, views, time, dim).permute(
+            0, 3, 1, 2, 4
+        )
+        return token + delta
+
+
 def sample_sequence_views(
     x: torch.Tensor,
     num_views: int,
@@ -111,6 +182,7 @@ class TemporalJointViewRUMPL(nn.Module):
         if fusion_mode not in (
             "global-residual",
             "query-residual",
+            "pre-vft-temporal",
             "mixste-ttb",
             "mixste-ttb-residual",
             "mixste-alternating",
@@ -124,6 +196,13 @@ class TemporalJointViewRUMPL(nn.Module):
         if residual_scale <= 0:
             raise ValueError("residual_scale must be positive")
         self.residual_scale = float(residual_scale)
+        if self.fusion_mode == "pre-vft-temporal":
+            self.pre_vft_temporal = PreVFTTemporalAdapter(
+                dim=self.dim,
+                num_heads=num_heads,
+                depth=depth,
+                temporal_length=self.temporal_length,
+            )
         self.joint_embedding = nn.Parameter(
             torch.zeros(1, 1, self.num_joints, 1, self.dim)
         )
@@ -665,6 +744,12 @@ class TemporalJointViewRUMPL(nn.Module):
             token = self._global_refine(
                 token, direction, point, confidence, delta_t
             )
+            token = self._rumpl_vft(token)
+            output = self._rumpl_pft_and_head(token)
+        elif self.fusion_mode == "pre-vft-temporal":
+            # Keep the camera axis intact until the original RUMPL VFT.  The
+            # adapter only sees each (joint, view) trajectory through time.
+            token = self.pre_vft_temporal(token)
             token = self._rumpl_vft(token)
             output = self._rumpl_pft_and_head(token)
         elif self.fusion_mode == "query-residual":

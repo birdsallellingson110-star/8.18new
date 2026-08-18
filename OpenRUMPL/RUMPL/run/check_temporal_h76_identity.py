@@ -46,7 +46,7 @@ def main():
     parser.add_argument(
         "--fusion-mode",
         choices=(
-            "global-residual", "query-residual", "mixste-ttb",
+            "global-residual", "query-residual", "pre-vft-temporal", "mixste-ttb",
             "mixste-ttb-residual",
             "mixste-alternating",
             "mixste-pose-residual",

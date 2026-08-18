@@ -173,9 +173,21 @@ def parse_args():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--mmpose-type", required=True)
     parser.add_argument("--dataset-name", default="annot_temporal_5_5")
+    parser.add_argument(
+        "--flip-lower-body-kp-test",
+        choices=("true", "false"),
+        default="true",
+        help="match the single-frame frontend protocol; default preserves legacy behavior",
+    )
     parser.add_argument("--num-views", type=int, choices=(2, 3, 4), required=True)
     parser.add_argument("--window-length", type=int, default=9)
     parser.add_argument("--frame-stride", type=int, default=5)
+    parser.add_argument(
+        "--model-window-length",
+        type=int,
+        default=0,
+        help="temporal length used to construct the checkpoint model; 0 uses --window-length",
+    )
     parser.add_argument(
         "--output-frame",
         choices=("latest", "center"),
@@ -192,7 +204,7 @@ def parse_args():
     parser.add_argument(
         "--fusion-mode",
         choices=(
-            "global-residual", "query-residual", "mixste-ttb",
+            "global-residual", "query-residual", "pre-vft-temporal", "mixste-ttb",
             "mixste-ttb-residual",
             "mixste-alternating",
             "mixste-pose-residual",
@@ -238,7 +250,7 @@ def main():
     config.DATASET.TEST_H36M_DATASET_NAME = args.dataset_name
     config.DATASET.TEST_MMPOSE_TYPE = args.mmpose_type
     config.DATASET.USE_MMPOSE_VAL = True
-    config.DATASET.FLIP_LOWER_BODY_KP_TEST = True
+    config.DATASET.FLIP_LOWER_BODY_KP_TEST = args.flip_lower_body_kp_test == "true"
     config.DATASET.TEST_ON_ALL_CAMERAS = True
     config.DATASET.TEST_VIEWS = list(range(1, args.num_views + 1))
     config.WANDB = False
@@ -262,7 +274,7 @@ def main():
             token_dropout=0.0, residual_gate=True,
             residual_scale=args.residual_scale,
             fusion_mode=args.fusion_mode,
-            temporal_length=args.window_length,
+            temporal_length=(args.model_window_length or args.window_length),
         )
         if args.temporal_checkpoint:
             payload = torch.load(args.temporal_checkpoint, map_location="cpu")

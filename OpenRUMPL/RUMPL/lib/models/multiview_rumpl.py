@@ -471,6 +471,109 @@ class RelativeViewFusion(nn.Module):
         return residual + self.gate * messages
 
 
+class MTFSourceNormalizedFusion(nn.Module):
+    """A faithful coordinate-level adaptation of MTF's pairwise view step.
+
+    MTF constructs a relation for every target/source view pair, predicts a
+    source attention weight from that relation, and aggregates the transformed
+    source features.  This module keeps that source-normalized pairwise
+    structure while operating on RUMPL's already calibrated ray tokens
+    ``(B,J,V,D)``.  It has no camera-ID embedding and therefore remains valid
+    for the variable 2/3/4-view protocol.  The default path returns one fused
+    token per joint; the residual ablation exposes per-view messages and keeps
+    RUMPL's fusion-token VFT as the main path.  The downstream PFT and absolute
+    3-D head are unchanged.
+    """
+
+    def __init__(
+        self,
+        num_joints,
+        dim,
+        use_confidence=False,
+        hidden_ratio=2.0,
+        residual_gate=False,
+    ):
+        super().__init__()
+        self.num_joints = num_joints
+        self.dim = dim
+        self.use_confidence = use_confidence
+        self.residual_gate = residual_gate
+        hidden = max(dim, int(dim * hidden_ratio))
+        pair_in = 3 * dim + (2 if use_confidence else 0)
+        self.input_norm = nn.LayerNorm(dim)
+        self.pair_encoder = nn.Sequential(
+            nn.Linear(pair_in, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+        )
+        self.attention = nn.Linear(hidden, 1)
+        self.message = nn.Linear(hidden, dim)
+        self.output = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+        )
+
+        # The residual variant is an identity at initialization.  This lets
+        # the established RUMPL fusion-token Transformer remain the main path
+        # while the MTF relation learns only a controlled correction.
+        if self.residual_gate:
+            self.gate = nn.Parameter(torch.zeros(1))
+
+    def forward_per_view(self, tokens, confidence=None):
+        if tokens.ndim != 4:
+            raise ValueError('tokens must have shape (B,J,V,D)')
+        batch, joints, views, dim = tokens.shape
+        if joints != self.num_joints or dim != self.dim:
+            raise ValueError(
+                'MTFSourceNormalizedFusion received incompatible tokens: '
+                f'{tuple(tokens.shape)}'
+            )
+        if views < 1:
+            raise ValueError('MTFSourceNormalizedFusion requires at least one view')
+        if self.use_confidence:
+            if confidence is None or confidence.shape[:3] != (batch, joints, views):
+                raise ValueError(
+                    'confidence must have shape (B,J,V,1) when source weighting is enabled'
+                )
+            conf = confidence[..., :1].clamp_min(1e-4)
+        else:
+            conf = None
+
+        normalized = self.input_norm(tokens)
+        target = normalized.unsqueeze(3).expand(-1, -1, -1, views, -1)
+        source = normalized.unsqueeze(2).expand(-1, -1, views, -1, -1)
+        relation = source - target
+        pair_parts = [target, source, relation]
+        if conf is not None:
+            target_conf = conf.unsqueeze(3).expand(-1, -1, -1, views, -1)
+            source_conf = conf.unsqueeze(2).expand(-1, -1, views, -1, -1)
+            pair_parts.extend((target_conf, source_conf))
+        pair = torch.cat(pair_parts, dim=-1)
+        hidden = self.pair_encoder(pair)
+        logits = self.attention(hidden).squeeze(-1)
+        if conf is not None:
+            # MTF uses visibility in the source relation; log-confidence is a
+            # bounded, scale-stable equivalent for the HRNet confidence input.
+            logits = logits + conf.squeeze(-1).unsqueeze(2).log()
+        weights = logits.softmax(dim=3)
+        source_values = tokens.unsqueeze(2).expand(-1, -1, views, -1, -1)
+        messages = self.message(hidden)
+        message = self.output(
+            (weights.unsqueeze(-1) * (source_values + messages)).sum(dim=3)
+        )
+        refined = tokens + (self.gate * message if self.residual_gate else message)
+        return refined
+
+    def forward(self, tokens, confidence=None):
+        refined = self.forward_per_view(tokens, confidence)
+        if not self.use_confidence:
+            return refined.mean(dim=2)
+        view_weights = confidence[..., :1].clamp_min(1e-4).squeeze(-1)
+        view_weights = view_weights / view_weights.sum(dim=2, keepdim=True).clamp_min(1e-6)
+        return (refined * view_weights.unsqueeze(-1)).sum(dim=2)
+
+
 class SkeletonViewReliabilityBias(nn.Module):
     """Predict one permutation-equivariant reliability logit per camera view.
 
@@ -648,11 +751,31 @@ class MultiView_RUMPL(nn.Module):
         self.relative_view_fusion = (
             os.environ.get('RUMPL_RELATIVE_VIEW_FUSION', '0') == '1'
         )
+        # MTF's source-normalized pairwise view fusion.  This is a separate
+        # opt-in replacement for VFT; the historical RelativeViewFusion flag
+        # remains untouched for reproducibility of earlier experiments.
+        self.mtf_source_norm_fusion = (
+            os.environ.get('RUMPL_MTF_SOURCE_NORM_FUSION', '0') == '1'
+        )
+        self.mtf_source_norm_confidence = (
+            os.environ.get('RUMPL_MTF_SOURCE_NORM_CONFIDENCE', '0') == '1'
+        )
+        self.mtf_source_norm_residual = (
+            os.environ.get('RUMPL_MTF_SOURCE_NORM_RESIDUAL', '0') == '1'
+        )
         self.skeleton_view_reliability = (
             os.environ.get('RUMPL_SKELETON_VIEW_RELIABILITY', '0') == '1'
         )
         self.confidence_view_bias = (
             os.environ.get('RUMPL_CONFIDENCE_VIEW_BIAS', '0') == '1'
+        )
+        # The official Learnable Triangulation confidence head emits positive
+        # per-view weights, not detector probabilities.  Its algebraic model
+        # normalizes them across the *currently selected* camera subset for
+        # every joint.  Keep this opt-in so legacy RUMPL detector inputs remain
+        # bit-for-bit unchanged.
+        self.normalize_view_confidence = (
+            os.environ.get('RUMPL_NORMALIZE_VIEW_CONFIDENCE', '0') == '1'
         )
         self.geometry_view_bias = (
             os.environ.get('RUMPL_GEOMETRY_VIEW_BIAS', '0') == '1'
@@ -759,6 +882,27 @@ class MultiView_RUMPL(nn.Module):
         self.gbt_set_decoder_depth = int(
             os.environ.get('RUMPL_GBT_SET_DECODER_DEPTH', '2')
         )
+        # GBT/MVGFormer-inspired parallel joint-query readout.  This branch
+        # does not replace H76's VFT/PFT path: it reads the encoded calibrated
+        # ray tokens before VFT and predicts a zero-initialized 3D residual
+        # beside the established head.  The memory is camera-ID free, so the
+        # same weights support arbitrary view order and 2/3/4 views.
+        self.gbt_query_residual = (
+            os.environ.get('RUMPL_GBT_QUERY_RESIDUAL', '0') == '1'
+        )
+        self.gbt_query_residual_global = (
+            os.environ.get('RUMPL_GBT_QUERY_RESIDUAL_GLOBAL', '1') == '1'
+        )
+        self.gbt_query_residual_depth = int(
+            os.environ.get('RUMPL_GBT_QUERY_RESIDUAL_DEPTH', '2')
+        )
+        self.gbt_query_residual_max_delta = float(
+            os.environ.get('RUMPL_GBT_QUERY_RESIDUAL_MAX_DELTA', '0.5')
+        )
+        if self.gbt_query_residual_depth < 1:
+            raise ValueError('RUMPL_GBT_QUERY_RESIDUAL_DEPTH must be positive')
+        if self.gbt_query_residual_max_delta <= 0:
+            raise ValueError('RUMPL_GBT_QUERY_RESIDUAL_MAX_DELTA must be positive')
         # Optional geometry-equivariant residual decoding.  The default-off
         # path is parameter- and numerics-identical to the RUMPL baseline.
         self.tri_anchor = os.environ.get('RUMPL_TRI_ANCHOR', '0') == '1'
@@ -947,6 +1091,26 @@ class MultiView_RUMPL(nn.Module):
             )
             torch.set_rng_state(rng_state)
 
+        if self.mtf_source_norm_fusion:
+            if not self.apply_view_fusion or not self.random_num_views:
+                raise ValueError(
+                    'RUMPL_MTF_SOURCE_NORM_FUSION requires random-view fusion mode'
+                )
+            if self.mtf_source_norm_confidence and not cfg.NETWORK.POSEFORMER_CONCAT_CONFIDENCE_EMB:
+                raise ValueError(
+                    'RUMPL_MTF_SOURCE_NORM_CONFIDENCE requires confidence input'
+                )
+            rng_state = torch.get_rng_state()
+            self.MTF_source_norm_fusion = MTFSourceNormalizedFusion(
+                num_joints=num_joints,
+                dim=embed_dim_ratio,
+                use_confidence=self.mtf_source_norm_confidence,
+                residual_gate=self.mtf_source_norm_residual,
+            )
+            # Do not shift initialization of the established RUMPL/PFT/head
+            # parameters so the two MTF arms share the same control stream.
+            torch.set_rng_state(rng_state)
+
         if self.skeleton_view_reliability:
             if not self.apply_view_fusion or not self.random_num_views:
                 raise ValueError(
@@ -1118,6 +1282,46 @@ class MultiView_RUMPL(nn.Module):
             )
             trunc_normal_(self.GBT_set_joint_embed, std=.02)
             trunc_normal_(self.GBT_joint_queries, std=.02)
+
+        if self.gbt_query_residual:
+            if not self.apply_view_fusion or not self.random_num_views:
+                raise ValueError(
+                    'RUMPL_GBT_QUERY_RESIDUAL requires random-view fusion mode'
+                )
+            # Do not perturb the established H76 initialization stream.  The
+            # new branch is loaded from scratch and its final projection is
+            # zero, hence adding it is an exact H76 identity before training.
+            rng_state = torch.get_rng_state()
+            self.gbt_query_joint_queries = nn.Parameter(
+                torch.zeros(1, num_joints, embed_dim_ratio)
+            )
+            self.gbt_query_joint_memory_embed = nn.Parameter(
+                torch.zeros(1, num_joints, 1, embed_dim_ratio)
+            )
+            self.gbt_query_anchor_embed = nn.Linear(3, embed_dim_ratio)
+            decoder_layer = nn.TransformerDecoderLayer(
+                d_model=embed_dim_ratio,
+                nhead=num_heads,
+                dim_feedforward=int(embed_dim_ratio * mlp_ratio),
+                dropout=drop_rate,
+                activation='gelu',
+                batch_first=True,
+                norm_first=True,
+            )
+            self.gbt_query_residual_decoder = nn.TransformerDecoder(
+                decoder_layer,
+                num_layers=self.gbt_query_residual_depth,
+                norm=norm_layer(embed_dim_ratio),
+            )
+            self.gbt_query_residual_head = nn.Sequential(
+                nn.LayerNorm(embed_dim_ratio),
+                nn.Linear(embed_dim_ratio, 3),
+            )
+            trunc_normal_(self.gbt_query_joint_queries, std=.02)
+            trunc_normal_(self.gbt_query_joint_memory_embed, std=.02)
+            nn.init.zeros_(self.gbt_query_residual_head[-1].weight)
+            nn.init.zeros_(self.gbt_query_residual_head[-1].bias)
+            torch.set_rng_state(rng_state)
         
         
         if self.apply_view_fusion and self.random_num_views:
@@ -1335,6 +1539,7 @@ class MultiView_RUMPL(nn.Module):
     def forward(self, x, is_training=True, **kwargs):
         # x: (b, num_joints, 1 or num_views, 4) or or (b, num_joints, num_views, 7) if apply_view_fusion
         b, num_joints, num_points, d = x.shape
+        mtf_source_norm_fused = False
         tri_anchor_point = None
         geometry_uncertainty = None
         _raw_dir = None
@@ -1350,9 +1555,53 @@ class MultiView_RUMPL(nn.Module):
                 use_fixed_views = fixed_train_views is not None and (
                     fixed_epochs <= 0 or current_epoch < fixed_epochs
                 )
+                # Optional cardinality curriculum.  The value is a semicolon
+                # separated list of ``start_epoch:w2,w3,w4`` entries, e.g.
+                # ``0:8,1,1;7:3,1,1;14:3,2,2``.  The last entry whose start
+                # epoch is not greater than the current epoch is used.  With
+                # the variable unset, the historical fixed distribution is
+                # unchanged.  This is intentionally an input-sampling-only
+                # control: it does not add a view-specific parameter or head.
+                curriculum_spec = os.environ.get(
+                    'RUMPL_CURRICULUM_VIEW_WEIGHTS', ''
+                ).strip()
                 raw_view_weights = os.environ.get(
                     'RUMPL_VIEW_COUNT_WEIGHTS', ''
                 ).strip()
+                if curriculum_spec:
+                    schedule = []
+                    for item in curriculum_spec.split(';'):
+                        item = item.strip()
+                        if not item:
+                            continue
+                        try:
+                            start_text, weights_text = item.split(':', 1)
+                            start_epoch = int(start_text.strip())
+                            weights_text = weights_text.strip()
+                            if start_epoch < 0 or not weights_text:
+                                raise ValueError
+                            schedule.append((start_epoch, weights_text))
+                        except ValueError as exc:
+                            raise ValueError(
+                                'RUMPL_CURRICULUM_VIEW_WEIGHTS must use '
+                                'start_epoch:w2,w3,w4 entries separated by ;'
+                            ) from exc
+                    if not schedule:
+                        raise ValueError(
+                            'RUMPL_CURRICULUM_VIEW_WEIGHTS cannot be empty'
+                        )
+                    schedule.sort(key=lambda pair: pair[0])
+                    if schedule[0][0] != 0:
+                        raise ValueError(
+                            'RUMPL_CURRICULUM_VIEW_WEIGHTS must start at epoch 0'
+                        )
+                    selected = schedule[0][1]
+                    for start_epoch, weights_text in schedule:
+                        if start_epoch <= current_epoch:
+                            selected = weights_text
+                        else:
+                            break
+                    raw_view_weights = selected
                 if not use_fixed_views:
                     if raw_view_weights:
                         view_weights = torch.tensor(
@@ -1400,6 +1649,8 @@ class MultiView_RUMPL(nn.Module):
                 if getattr(self, '_view_sampler_log_epoch', None) != current_epoch:
                     if use_fixed_views:
                         mode = f'fixed-{num_points}'
+                    elif curriculum_spec:
+                        mode = f'curriculum-random-{raw_view_weights}'
                     elif raw_view_weights:
                         mode = f'weighted-random-{raw_view_weights}'
                     else:
@@ -1420,6 +1671,35 @@ class MultiView_RUMPL(nn.Module):
                         flush=True,
                     )
                     self._view_sampler_log_epoch = current_epoch
+
+            if self.normalize_view_confidence:
+                confidence_index = 19 if (
+                    self.use_only_2D or self.feed_camera_calibration
+                ) else 6
+                if d <= confidence_index:
+                    raise RuntimeError(
+                        'RUMPL_NORMALIZE_VIEW_CONFIDENCE requires a confidence '
+                        f'channel at index {confidence_index}, input dim={d}'
+                    )
+                confidence = x[..., confidence_index:confidence_index + 1]
+                confidence = confidence / confidence.sum(
+                    dim=2, keepdim=True
+                ).clamp_min(1e-12)
+                x = torch.cat(
+                    (
+                        x[..., :confidence_index],
+                        confidence,
+                        x[..., confidence_index + 1:],
+                    ),
+                    dim=-1,
+                )
+                if not hasattr(self, '_normalize_view_confidence_logged'):
+                    print(
+                        '[NORMALIZE_VIEW_CONFIDENCE] enabled=1 '
+                        'axis=current_view_subset per_joint_sum=1',
+                        flush=True,
+                    )
+                    self._normalize_view_confidence_logged = True
                 
             if self.use_only_2D:
                 joints_2d = x[:, :, :, :2]
@@ -1680,6 +1960,16 @@ class MultiView_RUMPL(nn.Module):
                     )
                     self._semantic_graph_logged = True
 
+            # Keep the per-view encoded observations for the optional
+            # parallel joint-query residual.  It is deliberately captured
+            # before RUMPL's fusion-token VFT so the new decoder has a direct
+            # path to every camera token instead of another compressed token.
+            query_residual_memory = None
+            if self.gbt_query_residual:
+                query_residual_memory = x.view(
+                    b, num_joints, num_points, -1
+                )
+
             if self.gbt_set_decoder:
                 set_x = x.view(b, num_joints, num_points, -1)
                 set_x = set_x + self.GBT_set_joint_embed
@@ -1860,6 +2150,28 @@ class MultiView_RUMPL(nn.Module):
                         global_x - global_residual
                     )
                 x = global_x.reshape(b * num_joints, num_points, -1)
+
+            if self.random_num_views and self.mtf_source_norm_fusion:
+                view_tokens = x.view(b, num_joints, num_points, -1)
+                mtf_conf = conf if self.mtf_source_norm_confidence else None
+                if self.mtf_source_norm_residual:
+                    # Keep the established fusion-token VFT as the main path;
+                    # MTF contributes a zero-initialized per-view residual.
+                    x = self.MTF_source_norm_fusion.forward_per_view(
+                        view_tokens, mtf_conf
+                    ).reshape(b * num_joints, num_points, -1)
+                else:
+                    x = self.MTF_source_norm_fusion(view_tokens, mtf_conf)
+                    mtf_source_norm_fused = True
+                if not hasattr(self, '_mtf_source_norm_logged'):
+                    print(
+                        '[MTF_SOURCE_NORM] enabled=1 '
+                        f'mode={"residual_before_vft" if self.mtf_source_norm_residual else "replacement"} '
+                        f'confidence={int(self.mtf_source_norm_confidence)} '
+                        'camera_id_embedding=0 pairwise_relation=source_normalized',
+                        flush=True,
+                    )
+                    self._mtf_source_norm_logged = True
             
             if not self.random_num_views:
                 if self.add_view_enc:
@@ -1883,7 +2195,7 @@ class MultiView_RUMPL(nn.Module):
                         flush=True,
                     )
                     self._skip_vft_logged = True
-            elif self.random_num_views:
+            elif self.random_num_views and not mtf_source_norm_fused:
                 # Append the fusion token to the input
                 fusion_token = self.fusion_token.expand(b*num_joints, -1, -1)  # Shape: [batch, 1, embed_dim]
                 if self.geometry_uncertainty_token:
@@ -2252,6 +2564,53 @@ class MultiView_RUMPL(nn.Module):
             if self.per_joint_residual_gate:
                 x = x * self.residual_joint_gate
             x = x + self.tri_anchor_gate * tri_anchor_point
+
+        if self.gbt_query_residual:
+            if query_residual_memory is None:
+                raise RuntimeError(
+                    'GBT query residual memory was not constructed'
+                )
+            if tri_anchor_point is None:
+                anchor_for_query = x.new_zeros(b, num_joints, 3)
+            else:
+                anchor_for_query = tri_anchor_point
+            memory = (
+                query_residual_memory
+                + self.gbt_query_joint_memory_embed
+            )
+            query = self.gbt_query_joint_queries.expand(b, -1, -1)
+            query = query + self.gbt_query_anchor_embed(anchor_for_query)
+            if self.gbt_query_residual_global:
+                # Global memory follows GBT/MVGFormer's joint-query decoder:
+                # every learned joint query can inspect all joint/view tokens.
+                memory = memory.reshape(b, num_joints * num_points, -1)
+                decoded = self.gbt_query_residual_decoder(query, memory)
+            else:
+                # Controlled local ablation: each joint query only sees its
+                # own views.  This separates cross-joint context from the
+                # direct query-to-view path.
+                local_memory = memory.reshape(
+                    b * num_joints, num_points, -1
+                )
+                local_query = query.reshape(b * num_joints, 1, -1)
+                decoded = self.gbt_query_residual_decoder(
+                    local_query, local_memory
+                ).reshape(b, num_joints, -1)
+            raw_residual = self.gbt_query_residual_head(decoded)
+            residual = self.gbt_query_residual_max_delta * torch.tanh(
+                raw_residual
+            )
+            x = x + residual
+            if not hasattr(self, '_gbt_query_residual_logged'):
+                print(
+                    '[GBT_QUERY_RESIDUAL] enabled=1 '
+                    f'global={int(self.gbt_query_residual_global)} '
+                    f'depth={self.gbt_query_residual_depth} '
+                    f'max_delta={self.gbt_query_residual_max_delta} '
+                    'position=parallel_pre_vft_memory_zero_init=1',
+                    flush=True,
+                )
+                self._gbt_query_residual_logged = True
 
         return x
 

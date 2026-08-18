@@ -32,9 +32,15 @@ import torch
 import torch.nn.functional as functional
 
 from dense_geometry_residual_fusion import DenseGeometryResidualFusion
+from adafuse_style_heatmap_fusion import AdaFuseStyleHeatmapFusion
+from official_adafuse_heatmap_fusion import (
+    OfficialAdaFuseHeatmapFusion,
+    sampson_features_from_cameras,
+)
 from eval_h36m_sparse_epipolar_topk import (
     ACTION_NAMES,
     DIRECT_COCO_JOINTS,
+    DIRECT_H36M_JOINTS,
     KP_STAR,
     build_four_view_groups,
     camera_parameters,
@@ -42,6 +48,16 @@ from eval_h36m_sparse_epipolar_topk import (
     pixels_to_rays,
     robust_intersection,
     target_world_metres,
+)
+
+
+# The public Learnable Triangulation H36M checkpoint does not use the RUMPL
+# PKL joint order.  This maps its first 17 output channels directly into the
+# RUMPL/H36M order used by the target annotations.  It was verified against
+# the official LT label generator on a held-out 16-group smoke set.
+LT_PRED_TO_RUMPL = np.asarray(
+    [6, 3, 4, 5, 2, 1, 0, 7, 8, 16, 9, 13, 14, 15, 12, 11, 10],
+    dtype=np.int64,
 )
 
 
@@ -61,9 +77,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-min-m", type=float, default=1.0)
     parser.add_argument("--depth-max-m", type=float, default=10.0)
     parser.add_argument("--depth-samples", type=int, default=64)
+    parser.add_argument(
+        "--support-mode",
+        choices=("depth", "line", "official_line"),
+        default="depth",
+        help=(
+            "Epipolar support construction: depth samples, bilinear full "
+            "image line, or AdaFuse's nearest-neighbour full line."
+        ),
+    )
     parser.add_argument("--irls-iterations", type=int, default=5)
+    parser.add_argument(
+        "--solver",
+        choices=("robust_ray", "dlt"),
+        default="robust_ray",
+        help=(
+            "3D solver. robust_ray is the RUMPL diagnostic solver; dlt "
+            "matches AdaFuse's unweighted projection-matrix triangulation."
+        ),
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--fusion-checkpoint")
+    parser.add_argument(
+        "--joint-format", choices=("coco", "h36m", "lt_h36m"), default="coco",
+        help=("Heatmap channel order: apply COCO->H36M conversion, use the "
+              "RUMPL H36M order directly, or remap the public LT H36M order."),
+    )
+    parser.add_argument(
+        "--fusion-model-kind",
+        choices=("auto", "a1d", "adafuse_style", "official_adafuse"),
+        default="auto",
+        help="Fusion module used by --fusion-checkpoint.",
+    )
+    parser.add_argument(
+        "--heatmap-mode", choices=("nonnegative", "signed"),
+        default="nonnegative",
+        help="Match the detector heatmap treatment used during fusion training.",
+    )
     parser.add_argument("--limit-groups", type=int, default=0)
     parser.add_argument("--output", required=True)
     return parser.parse_args()
@@ -139,6 +189,53 @@ def heatmap_to_image(
         + center
         - 0.5 * scale
     )
+
+
+def projection_matrix(
+    intrinsic: np.ndarray, rotation: np.ndarray, center: np.ndarray
+) -> np.ndarray:
+    """Build P=K[R|-RC] from the H36M world-to-camera convention."""
+    translation = -rotation @ center.reshape(3)
+    return intrinsic @ np.concatenate(
+        (rotation, translation[:, None]), axis=1
+    )
+
+
+def dlt_triangulation(
+    pixels: np.ndarray,
+    projection_matrices: np.ndarray,
+) -> np.ndarray:
+    """Unweighted DLT used by the public AdaFuse implementation.
+
+    Args:
+        pixels: V x J x 2 image coordinates in the original image frame.
+        projection_matrices: V x 3 x 4 matrices in metre world units.
+    Returns:
+        J x 3 world coordinates in metres.
+    """
+    pixels = np.asarray(pixels, dtype=np.float64)
+    matrices = np.asarray(projection_matrices, dtype=np.float64)
+    n_views, n_joints = pixels.shape[:2]
+    output = np.zeros((n_joints, 3), dtype=np.float64)
+    for joint in range(n_joints):
+        rows = []
+        for view in range(n_views):
+            x, y = pixels[view, joint]
+            p = matrices[view]
+            rows.append(x * p[2] - p[0])
+            rows.append(y * p[2] - p[1])
+        design = np.stack(rows, axis=0)
+        try:
+            _, _, vh = np.linalg.svd(design, full_matrices=False)
+            homogeneous = vh[-1]
+            denominator = homogeneous[3]
+            if abs(denominator) < 1e-10:
+                output[joint] = 0.0
+            else:
+                output[joint] = homogeneous[:3] / denominator
+        except np.linalg.LinAlgError:
+            output[joint] = 0.0
+    return output
 
 
 def image_to_heatmap_torch(
@@ -227,8 +324,21 @@ def epipolar_support(
     crop_centers: np.ndarray,
     crop_scales: np.ndarray,
     depths: torch.Tensor,
+    mode: str = "depth",
 ) -> torch.Tensor:
     """V x V x J x H x W support; diagonal entries are zero."""
+    if mode in ("line", "official_line"):
+        return epipolar_line_support(
+            normalized_heatmaps,
+            intrinsics,
+            rotations,
+            centers,
+            crop_centers,
+            crop_scales,
+            float(depths.min()),
+            float(depths.max()),
+            interpolation="nearest" if mode == "official_line" else "bilinear",
+        )
     n_views, n_joints, height, width = normalized_heatmaps.shape
     supports = normalized_heatmaps.new_zeros(
         (n_views, n_views, n_joints, height, width)
@@ -260,7 +370,105 @@ def epipolar_support(
                 padding_mode="zeros",
                 align_corners=True,
             )[0]
+            # sampled: J x depth samples x target-HW pixels.
             supports[target, source] = sampled.amax(dim=1).reshape(
+                n_joints, height, width
+            )
+    return supports
+
+
+def epipolar_line_support(
+    normalized_heatmaps: torch.Tensor,
+    intrinsics: list[np.ndarray],
+    rotations: list[np.ndarray],
+    centers: np.ndarray,
+    crop_centers: np.ndarray,
+    crop_scales: np.ndarray,
+    depth_min: float,
+    depth_max: float,
+    interpolation: str = "bilinear",
+) -> torch.Tensor:
+    """Sample the full source heatmap epipolar line.
+
+    This follows the public AdaFuse implementation more closely than a finite
+    depth sweep: two world points at the endpoint depths define an epipolar
+    line in the source heatmap, and all source columns plus all source rows
+    are sampled.  Out-of-image samples use zero padding.  The operation is
+    camera-ID-free and preserves the existing ``target, source`` layout.
+    """
+    n_views, n_joints, height, width = normalized_heatmaps.shape
+    device = normalized_heatmaps.device
+    dtype = normalized_heatmaps.dtype
+    supports = normalized_heatmaps.new_zeros(
+        (n_views, n_views, n_joints, height, width)
+    )
+    endpoint_depths = torch.as_tensor(
+        [depth_min, depth_max], dtype=torch.float32, device=device
+    )
+    # Sampling every column and row matches the H+W line samples in the
+    # official CamFusionModule.  Heatmap coordinates use x,y ordering.
+    xs = torch.arange(width, dtype=torch.float32, device=device)
+    ys = torch.arange(height, dtype=torch.float32, device=device)
+    for target in range(n_views):
+        for source in range(n_views):
+            if source == target:
+                continue
+            endpoint_grid = projection_grid(
+                intrinsics[target],
+                rotations[target],
+                centers[target],
+                crop_centers[target],
+                crop_scales[target],
+                intrinsics[source],
+                rotations[source],
+                centers[source],
+                crop_centers[source],
+                crop_scales[source],
+                width,
+                height,
+                endpoint_depths,
+                device,
+            )
+            normalizer = endpoint_grid.new_tensor(
+                [max(width - 1, 1), max(height - 1, 1)]
+            )
+            endpoint_hm = (endpoint_grid + 1.0) * normalizer / 2.0
+            p0, p1 = endpoint_hm[0], endpoint_hm[1]
+            x0, y0 = p0[:, 0], p0[:, 1]
+            x1, y1 = p1[:, 0], p1[:, 1]
+            a = y0 - y1
+            b = x1 - x0
+            c = x0 * y1 - x1 * y0
+            eps = 1e-6
+
+            # H+W points per target heatmap pixel: all source columns and all
+            # source rows.  The invalid branch is sent outside grid_sample's
+            # [-1,1] range, so padding is exactly zero.
+            xh = xs[None, :].expand(height * width, -1)
+            yh_den = torch.where(b.abs() > eps, b, b.sign() * eps + eps)
+            yh = (-(a[:, None] * xh + c[:, None]) / yh_den[:, None])
+            yh_valid = b.abs() > eps
+            xv = (-(b[:, None] * ys[None, :] + c[:, None]) /
+                  torch.where(a.abs() > eps, a, a.sign() * eps + eps)[:, None])
+            xv_valid = a.abs() > eps
+            yh_valid = yh_valid[:, None] & (yh >= 0.0) & (yh <= height - 1)
+            xv_valid = xv_valid[:, None] & (xv >= 0.0) & (xv <= width - 1)
+            horizontal = torch.stack((xh, yh), dim=-1)
+            vertical = torch.stack((xv, ys[None, :].expand_as(xv)), dim=-1)
+            line_hm = torch.cat((horizontal, vertical), dim=1)
+            valid = torch.cat((yh_valid, xv_valid), dim=1)
+            line_grid = line_hm / normalizer * 2.0 - 1.0
+            line_grid = torch.where(
+                valid[..., None], line_grid, line_grid.new_full((), 2.0)
+            )
+            sampled = functional.grid_sample(
+                normalized_heatmaps[source : source + 1],
+                line_grid[None],
+                mode=interpolation,
+                padding_mode="zeros",
+                align_corners=True,
+            )[0]
+            supports[target, source] = sampled.amax(dim=2).reshape(
                 n_joints, height, width
             )
     return supports
@@ -383,6 +591,8 @@ def fusion_variants(
 def summarize(
     errors: dict[str, dict[str, list[float]]],
     kp_errors: dict[str, list[float]],
+    root_errors: dict[str, dict[str, list[float]]] | None = None,
+    root_kp_errors: dict[str, list[float]] | None = None,
 ) -> dict:
     output = {}
     for method, action_values in errors.items():
@@ -400,6 +610,29 @@ def summarize(
             "frame_weighted_kp_star_mm": float(np.mean(kp_errors[method])),
             "per_action_all17_mm": per_action,
         }
+        if root_errors is not None:
+            root_action_values = root_errors[method]
+            root_per_action = {
+                action: float(np.mean(values))
+                for action, values in sorted(root_action_values.items())
+            }
+            root_values = [
+                value for action_group in root_action_values.values()
+                for value in action_group
+            ]
+            output[method].update({
+                "frame_weighted_root_relative_all17_mm": float(
+                    np.mean(root_values)
+                ),
+                "action_equal_root_relative_all17_mm": float(
+                    np.mean(list(root_per_action.values()))
+                ),
+                "per_action_root_relative_all17_mm": root_per_action,
+            })
+            if root_kp_errors is not None:
+                output[method]["frame_weighted_root_relative_kp_star_mm"] = float(
+                    np.mean(root_kp_errors[method])
+                )
     return output
 
 
@@ -413,7 +646,11 @@ def evaluate_cardinality(
     irls_iterations: int,
     limit_groups: int,
     device: torch.device,
-    fusion_model: DenseGeometryResidualFusion | None,
+    fusion_model: torch.nn.Module | None,
+    support_mode: str,
+    solver: str,
+    joint_format: str,
+    heatmap_mode: str,
 ) -> dict:
     groups = [
         [group[index] for index in combination]
@@ -426,13 +663,19 @@ def evaluate_cardinality(
         lambda: defaultdict(list)
     )
     kp_errors: dict[str, list[float]] = defaultdict(list)
+    root_errors: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    root_kp_errors: dict[str, list[float]] = defaultdict(list)
 
     for group_number, group in enumerate(groups, start=1):
         group_records = [records[index] for index in group]
         data = store.get(group)
         raw_heatmaps = torch.as_tensor(
             data["heatmaps"], dtype=torch.float32, device=device
-        ).clamp_min_(0.0)
+        )
+        if heatmap_mode != "signed":
+            raw_heatmaps = raw_heatmaps.clamp_min_(0.0)
         maximum = raw_heatmaps.flatten(-2).amax(dim=-1, keepdim=True)
         normalized = raw_heatmaps / maximum.clamp_min(1e-6)[..., None]
 
@@ -440,6 +683,9 @@ def evaluate_cardinality(
         intrinsics = [item[0] for item in camera_data]
         rotations = [item[1] for item in camera_data]
         centers = np.stack([item[2] for item in camera_data])
+        projection_matrices = np.stack(
+            [projection_matrix(*item) for item in camera_data]
+        )
         support = epipolar_support(
             normalized,
             intrinsics,
@@ -448,21 +694,113 @@ def evaluate_cardinality(
             data["input_center"],
             data["input_scale"],
             depths,
+            mode=support_mode,
         )
         variants = fusion_variants(normalized, support, alphas)
+        method_confidences: dict[str, np.ndarray] = {}
         if fusion_model is not None:
-            joint_ids = torch.as_tensor(
-                DIRECT_COCO_JOINTS, dtype=torch.long, device=device
+            if joint_format == "coco":
+                fusion_channels = DIRECT_COCO_JOINTS
+                # The fusion model's embedding is semantic H36M order, not
+                # raw COCO channel order.
+                fusion_joint_ids = DIRECT_H36M_JOINTS
+            elif joint_format == "lt_h36m":
+                # The public LT checkpoint stores the 17 channels in its own
+                # order.  Reorder the raw heatmaps into RUMPL/H36M order
+                # before sending them to a fusion checkpoint trained with
+                # semantic H36M channels; assigning back to these same source
+                # indices below restores the raw order for final decoding.
+                fusion_channels = LT_PRED_TO_RUMPL
+                fusion_joint_ids = np.arange(17, dtype=np.int64)
+            else:
+                # Native H36M exposes all 17 channels directly.  Applying the
+                # COCO 13-channel slice here silently drops joints.
+                fusion_channels = np.arange(17, dtype=np.int64)
+                fusion_joint_ids = np.arange(17, dtype=np.int64)
+            fusion_channels_t = torch.as_tensor(
+                fusion_channels, dtype=torch.long, device=device
             )
+            joint_ids = torch.as_tensor(
+                fusion_joint_ids, dtype=torch.long, device=device
+            )
+            fusion_distances = None
+            fusion_confidences = None
+            model_kind = getattr(fusion_model, "model_kind", None)
+            if isinstance(fusion_model, OfficialAdaFuseHeatmapFusion):
+                source_xy = data["decoded_keypoints"].astype(np.float64)
+                source_conf = data["decoded_scores"].astype(np.float64)
+                if joint_format == "coco":
+                    converted_xy = []
+                    converted_conf = []
+                    for view in range(n_views):
+                        joints, confidence = coco_to_h36m(
+                            source_xy[view], source_conf[view]
+                        )
+                        converted_xy.append(joints)
+                        converted_conf.append(confidence)
+                    source_xy = np.stack(converted_xy)
+                    source_conf = np.stack(converted_conf)
+                elif joint_format == "lt_h36m":
+                    source_xy = source_xy[:, LT_PRED_TO_RUMPL]
+                    source_conf = source_conf[:, LT_PRED_TO_RUMPL]
+                # OfficialAdaFuseHeatmapFusion is trained on the 13 direct
+                # COCO/H36M joints, while ``coco_to_h36m`` above also creates
+                # four synthetic H36M joints for the triangulator.  Keep the
+                # descriptor tensor in the same 13-joint semantic order as
+                # the fusion heatmaps.
+                if isinstance(fusion_model, OfficialAdaFuseHeatmapFusion) and joint_format == "coco":
+                    source_xy = source_xy[:, DIRECT_H36M_JOINTS]
+                    source_conf = source_conf[:, DIRECT_H36M_JOINTS]
+                fusion_distances, fusion_confidences = (
+                    sampson_features_from_cameras(
+                        source_xy,
+                        source_conf,
+                        intrinsics,
+                        rotations,
+                        centers,
+                    )
+                )
+                fusion_distances = torch.as_tensor(
+                    fusion_distances, dtype=torch.float32, device=device
+                )
+                fusion_confidences = torch.as_tensor(
+                    fusion_confidences, dtype=torch.float32, device=device
+                )
             with torch.no_grad():
-                learned_logits, _ = fusion_model(
-                    normalized[:, DIRECT_COCO_JOINTS],
-                    support[:, :, DIRECT_COCO_JOINTS],
+                learned_output, _ = fusion_model(
+                    normalized[:, fusion_channels_t],
+                    support[:, :, fusion_channels_t],
+                    distances=fusion_distances,
+                    confidences=fusion_confidences,
                     joint_ids=joint_ids,
                 )
-            learned_full = torch.log(normalized + 1e-4)
-            learned_full[:, DIRECT_COCO_JOINTS] = learned_logits
+            signed_fusion = (
+                isinstance(fusion_model, OfficialAdaFuseHeatmapFusion)
+                and fusion_model.signed_heatmaps
+            )
+            if signed_fusion:
+                learned_full = normalized.clone()
+                learned_full[:, fusion_channels_t] = learned_output
+            else:
+                learned_full = torch.log(normalized + 1e-4)
+                learned_full[:, fusion_channels_t] = learned_output
             variants["learned_dense_residual"] = learned_full
+            # Separate coordinate and confidence effects.  The original
+            # learned result keeps detector confidences; this variant uses
+            # the corrected heatmap peak as the triangulation confidence,
+            # matching AdaFuse's fused-heatmap reliability semantics.
+            fused_confidence = data["decoded_scores"].astype(np.float64).copy()
+            fused_confidence[:, fusion_channels] = (
+                (
+                    learned_output
+                    if signed_fusion
+                    else torch.exp(learned_output)
+                ).flatten(-2).amax(-1).cpu().numpy()
+            )
+            method_confidences["learned_dense_residual_fused_conf"] = (
+                fused_confidence
+            )
+            variants["learned_dense_residual_fused_conf"] = learned_full
         methods: dict[str, np.ndarray] = {
             "top1": data["decoded_keypoints"].astype(np.float64)
         }
@@ -496,41 +834,75 @@ def evaluate_cardinality(
         action = ACTION_NAMES[int(group_records[0]["action"])]
         raw_confidence = data["decoded_scores"].astype(np.float64)
         for method, coco_xy in methods.items():
-            h36m_xy = []
-            h36m_confidence = []
-            for view in range(n_views):
-                joints, confidence = coco_to_h36m(
-                    coco_xy[view], raw_confidence[view]
+            confidence_source = method_confidences.get(method, raw_confidence)
+            if joint_format in ("h36m", "lt_h36m"):
+                # The LT public H36M checkpoint already emits the 17 joints in
+                # H36M order; applying the RUMPL COCO conversion again would
+                # silently scramble the channels.  LT's public checkpoint has
+                # a different H36M permutation, handled explicitly below.
+                h36m_xy = np.asarray(coco_xy, dtype=np.float64)
+                h36m_confidence = np.asarray(confidence_source, dtype=np.float64)
+                if joint_format == "lt_h36m":
+                    h36m_xy = h36m_xy[:, LT_PRED_TO_RUMPL]
+                    h36m_confidence = h36m_confidence[:, LT_PRED_TO_RUMPL]
+            else:
+                h36m_xy = []
+                h36m_confidence = []
+                for view in range(n_views):
+                    joints, confidence = coco_to_h36m(
+                        coco_xy[view], confidence_source[view]
+                    )
+                    h36m_xy.append(joints)
+                    h36m_confidence.append(confidence)
+                h36m_xy = np.stack(h36m_xy)
+                h36m_confidence = np.stack(h36m_confidence)
+            if solver == "dlt":
+                prediction = dlt_triangulation(
+                    h36m_xy, projection_matrices
                 )
-                h36m_xy.append(joints)
-                h36m_confidence.append(confidence)
-            h36m_xy = np.stack(h36m_xy)
-            h36m_confidence = np.stack(h36m_confidence)
-            directions = np.stack(
-                [
-                    pixels_to_rays(
-                        h36m_xy[view], intrinsics[view], rotations[view]
-                    )
-                    for view in range(n_views)
-                ]
-            )
-            prediction = np.stack(
-                [
-                    robust_intersection(
-                        centers,
-                        directions[:, joint],
-                        h36m_confidence[:, joint],
-                        irls_iterations,
-                    )
-                    for joint in range(17)
-                ]
-            )
+            else:
+                directions = np.stack(
+                    [
+                        pixels_to_rays(
+                            h36m_xy[view], intrinsics[view], rotations[view]
+                        )
+                        for view in range(n_views)
+                    ]
+                )
+                prediction = np.stack(
+                    [
+                        robust_intersection(
+                            centers,
+                            directions[:, joint],
+                            h36m_confidence[:, joint],
+                            irls_iterations,
+                        )
+                        for joint in range(17)
+                    ]
+                )
             joint_error = (
                 np.linalg.norm(prediction - target, axis=-1) * 1000.0
+            )
+            # AdaFuse's official H36M evaluator aligns the predicted pelvis
+            # to the GT pelvis before MPJPE.  Keep this metric beside the
+            # absolute metric instead of silently replacing it, so our
+            # RUMPL/heatmap table remains auditable and directly comparable
+            # to the official 19.54-mm protocol.
+            prediction_root_relative = prediction - prediction[0:1]
+            target_root_relative = target - target[0:1]
+            root_joint_error = (
+                np.linalg.norm(
+                    prediction_root_relative - target_root_relative, axis=-1
+                )
+                * 1000.0
             )
             errors[method][action].append(float(joint_error.mean()))
             kp_errors[method].append(
                 float(joint_error[list(KP_STAR)].mean())
+            )
+            root_errors[method][action].append(float(root_joint_error.mean()))
+            root_kp_errors[method].append(
+                float(root_joint_error[list(KP_STAR)].mean())
             )
 
         if group_number % 25 == 0 or group_number == len(groups):
@@ -542,7 +914,9 @@ def evaluate_cardinality(
     return {
         "views": n_views,
         "groups": len(groups),
-        "methods": summarize(errors, kp_errors),
+        "methods": summarize(
+            errors, kp_errors, root_errors, root_kp_errors
+        ),
     }
 
 
@@ -564,7 +938,17 @@ def main() -> None:
     fusion_model = None
     if args.fusion_checkpoint:
         payload = torch.load(args.fusion_checkpoint, map_location=device)
-        fusion_model = DenseGeometryResidualFusion().to(device)
+        model_kind = args.fusion_model_kind
+        if model_kind == "auto":
+            model_kind = payload.get("model_kind", payload.get("args", {}).get("model_kind", "a1d"))
+        if model_kind == "adafuse_style":
+            fusion_model = AdaFuseStyleHeatmapFusion().to(device)
+        elif model_kind == "official_adafuse":
+            fusion_model = OfficialAdaFuseHeatmapFusion(
+                signed_heatmaps=args.heatmap_mode == "signed"
+            ).to(device)
+        else:
+            fusion_model = DenseGeometryResidualFusion().to(device)
         fusion_model.load_state_dict(payload["model"])
         fusion_model.eval()
     depths = torch.linspace(
@@ -579,8 +963,13 @@ def main() -> None:
         "complete_four_view_groups": len(four_view_groups),
         "depth_range_m": [args.depth_min_m, args.depth_max_m],
         "depth_samples": args.depth_samples,
+        "support_mode": args.support_mode,
         "alphas": args.alphas,
         "fusion_checkpoint": args.fusion_checkpoint,
+        "fusion_model_kind": args.fusion_model_kind,
+        "heatmap_mode": args.heatmap_mode,
+        "solver": args.solver,
+        "joint_format": args.joint_format,
         "results": {},
     }
     for n_views in args.views:
@@ -595,6 +984,10 @@ def main() -> None:
             args.limit_groups,
             device,
             fusion_model,
+            args.support_mode,
+            args.solver,
+            args.joint_format,
+            args.heatmap_mode,
         )
         results["results"][f"V{n_views}"] = cardinality
         print(f"V{n_views}", flush=True)

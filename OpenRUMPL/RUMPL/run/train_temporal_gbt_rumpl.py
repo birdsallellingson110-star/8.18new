@@ -103,7 +103,7 @@ def parse_args():
     parser.add_argument(
         "--fusion-mode",
         choices=(
-            "global-residual", "query-residual", "mixste-ttb",
+            "global-residual", "query-residual", "pre-vft-temporal", "mixste-ttb",
             "mixste-ttb-residual",
             "mixste-alternating",
             "mixste-pose-residual",
@@ -115,6 +115,17 @@ def parse_args():
     parser.add_argument("--micro-batch-size", type=int, default=2)
     parser.add_argument("--effective-batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument(
+        "--cache-frame-rays",
+        action="store_true",
+        help="precompute each synchronized frame's RUMPL rays once before window sampling",
+    )
+    parser.add_argument(
+        "--cache-workers",
+        type=int,
+        default=0,
+        help="thread workers used only while building --cache-frame-rays",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument(
@@ -160,7 +171,7 @@ def parse_args():
     )
     parser.add_argument(
         "--backbone-train-scope",
-        choices=("all", "head", "pft-head", "vft"),
+        choices=("all", "head", "pft-head", "vft", "vft-pft-head"),
         default="all",
         help="subset of retained RUMPL optimized when --unfreeze-backbone is set",
     )
@@ -217,6 +228,8 @@ def build_train_dataset(args):
         window_length=args.window_length,
         frame_stride=args.frame_stride,
         window_step=1,
+        cache_frames=args.cache_frame_rays,
+        cache_workers=args.cache_workers,
     )
     if args.max_windows > 0:
         temporal = Subset(temporal, range(min(args.max_windows, len(temporal))))
@@ -346,6 +359,10 @@ def main():
             "vft": (
                 "fusion_token", "blocks_view_fusion.", "View_norm.",
                 "encoding_to_embedding.", "confidence_to_embedding.",
+            ),
+            "vft-pft-head": (
+                "fusion_token", "blocks_view_fusion.", "View_norm.",
+                "Spatial_pos_embed", "blocks.", "Spatial_norm.", "head.",
             ),
         }[args.backbone_train_scope]
         for name, parameter in model.backbone.named_parameters():

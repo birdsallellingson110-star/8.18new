@@ -4,6 +4,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import random
 import sys
@@ -70,6 +71,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--model-num-views",
+        type=int,
+        choices=(2, 3, 4, 5),
+        help=(
+            "Construct the checkpoint's legacy view-dependent layer with this "
+            "view count, then restore the requested dataset view count before "
+            "building the loader. This preserves strict checkpoint loading for "
+            "TRAIN_RANDOM_NUM_VIEWS models whose forward pass accepts variable "
+            "view counts but whose unused weighted_mean tensor was saved at K=2."
+        ),
+    )
+    parser.add_argument(
         "--all-views-cmu",
         type=int,
         nargs="+",
@@ -93,6 +106,15 @@ def main():
         ),
     )
     parser.add_argument("--sample-seed", type=int, default=0)
+    parser.add_argument(
+        "--sample-frames-per-action",
+        type=int,
+        default=0,
+        help=(
+            "Sample synchronized H36M frames per action while retaining all "
+            "camera combinations for each selected frame."
+        ),
+    )
     parser.add_argument(
         "--selection-manifest",
         help="Write selected database indices/camera IDs as JSON.",
@@ -134,9 +156,17 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+    dataset_num_views = config.DATASET.N_VIEWS_TRAIN_TEST_ALL
+    if args.model_num_views is not None:
+        if not config.DATASET.TRAIN_RANDOM_NUM_VIEWS:
+            raise ValueError(
+                "--model-num-views is only valid for TRAIN_RANDOM_NUM_VIEWS models"
+            )
+        config.DATASET.N_VIEWS_TRAIN_TEST_ALL = args.model_num_views
     model = getattr(models, config.MODEL).get_multiview_rumpl_net(
         config, is_train=False
     )
+    config.DATASET.N_VIEWS_TRAIN_TEST_ALL = dataset_num_views
     state = torch.load(args.checkpoint, map_location="cpu")
     if "state_dict" in state:
         state = state["state_dict"]
@@ -172,6 +202,11 @@ def main():
         False,
         transforms.Compose([transforms.ToTensor(), normalize]),
     )
+    if args.sample_groups_per_action and args.sample_frames_per_action:
+        raise ValueError(
+            "--sample-groups-per-action and --sample-frames-per-action are exclusive"
+        )
+    original_grouping_indices = list(range(len(valid_dataset.grouping)))
     if args.sample_groups_per_action:
         by_action = {}
         for grouping_index, group in enumerate(valid_dataset.grouping):
@@ -189,7 +224,46 @@ def main():
         valid_dataset.grouping = [
             valid_dataset.grouping[index] for index in selected_indices
         ]
+        original_grouping_indices = selected_indices
         # multiview_h36m_rumpl caches this value for __len__.
+        if hasattr(valid_dataset, "group_size"):
+            valid_dataset.group_size = len(valid_dataset.grouping)
+    elif args.sample_frames_per_action:
+        if not config.DATASET.TEST_ON_ALL_CAMERAS:
+            raise ValueError("frame sampling requires TEST_ON_ALL_CAMERAS")
+        combinations_per_frame = math.comb(4, config.DATASET.N_VIEWS_TRAIN_TEST_ALL)
+        if len(valid_dataset.grouping) % combinations_per_frame:
+            raise ValueError("camera-combination grouping is not frame-aligned")
+        by_action = {}
+        frame_starts = list(range(0, len(valid_dataset.grouping), combinations_per_frame))
+        for frame_start in frame_starts:
+            chunk = valid_dataset.grouping[
+                frame_start:frame_start + combinations_per_frame
+            ]
+            actions = {
+                int(valid_dataset.db[group[0]]["action"]) for group in chunk
+            }
+            if len(actions) != 1:
+                raise ValueError("camera-combination chunk crosses H36M actions")
+            by_action.setdefault(actions.pop(), []).append(frame_start)
+        rng = random.Random(args.sample_seed)
+        selected_frame_starts = []
+        for action in sorted(by_action):
+            candidates = by_action[action]
+            rng.shuffle(candidates)
+            selected_frame_starts.extend(
+                candidates[:args.sample_frames_per_action]
+            )
+        selected_frame_starts.sort()
+        selected_indices = [
+            index
+            for frame_start in selected_frame_starts
+            for index in range(frame_start, frame_start + combinations_per_frame)
+        ]
+        valid_dataset.grouping = [
+            valid_dataset.grouping[index] for index in selected_indices
+        ]
+        original_grouping_indices = selected_indices
         if hasattr(valid_dataset, "group_size"):
             valid_dataset.group_size = len(valid_dataset.grouping)
     if args.selection_manifest:
@@ -197,9 +271,11 @@ def main():
             "test_subset": config.DATASET.TEST_SUBSET,
             "test_views": list(config.DATASET.TEST_VIEWS),
             "sample_groups_per_action": args.sample_groups_per_action,
+            "sample_frames_per_action": args.sample_frames_per_action,
             "sample_seed": args.sample_seed,
             "groups": [
                 {
+                    "grouping_index": int(original_grouping_indices[position]),
                     "record_indices": [int(index) for index in group],
                     "camera_ids": [
                         int(valid_dataset.db[index]["camera_id"])
@@ -212,7 +288,7 @@ def main():
                         valid_dataset.db[index]["image"] for index in group
                     ],
                 }
-                for group in valid_dataset.grouping
+                for position, group in enumerate(valid_dataset.grouping)
             ],
         }
         manifest_path = os.path.abspath(args.selection_manifest)
