@@ -1,0 +1,123 @@
+# Recreated from rumpl_venv310 on 2026-08-18
+# Python 3.10.20
+# PyTorch 2.1.0+cu118 (CUDA 11.8)
+#
+# Recreate:
+#   python3.10 -m venv rumpl_venv310
+#   rumpl_venv310/bin/pip install -U pip
+#   rumpl_venv310/bin/pip install -r requirements.txt
+#
+# mmcv 2.1.0 is the CUDA/torch-matched OpenMMLab wheel. If the default
+# PyPI build fails, install it separately:
+#   pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html
+--extra-index-url https://download.pytorch.org/whl/cu118
+-f https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html
+
+addict==2.4.0
+amass==1.0.1
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+blosc2==4.3.3
+certifi==2022.12.7
+charset-normalizer==2.1.1
+chumpy==0.70
+click==8.4.1
+contourpy==1.3.2
+cycler==0.12.1
+Cython==3.2.5
+easydict==1.13
+einops==0.8.2
+exceptiongroup==1.3.1
+filelock==3.29.0
+fonttools==4.63.0
+freetype-py==2.5.1
+fsspec==2026.4.0
+gitdb==4.0.12
+GitPython==3.1.50
+h11==0.16.0
+h5py==3.16.0
+hf-xet==1.5.1
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.18.0
+idna==3.4
+ImageIO==2.37.3
+importlib_resources==7.1.0
+Jinja2==3.1.6
+json-tricks==3.17.3
+kiwisolver==1.5.0
+lazy-loader==0.5
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+matplotlib==3.10.9
+mdurl==0.1.2
+mmcv==2.1.0
+mmdet==3.3.0
+mmengine==0.10.7
+mmpose==1.3.2
+mpmath==1.3.0
+msgpack==1.1.2
+multicamselfcal==0.3.3
+munkres==1.1.4
+narwhals==2.22.1
+ndindex==1.10.1
+networkx==3.4.2
+numexpr==2.14.1
+numpy==1.26.4
+opencv-python==4.11.0.86
+packaging==26.2
+pandas==2.3.3
+pillow==12.2.0
+platformdirs==4.10.0
+plotly==6.8.0
+protobuf==7.35.0
+py-cpuinfo==9.0.0
+pycocotools==2.0.11
+pydantic==2.13.4
+pydantic_core==2.46.4
+pyglet==2.1.14
+Pygments==2.20.0
+pymvg==2.1.0
+PyOpenGL==3.1.0
+pyparsing==3.3.2
+pyrender==0.1.45
+python-dateutil==2.9.0.post0
+pytz==2026.2
+PyYAML==6.0.3
+requests==2.28.1
+rich==15.0.0
+safetensors==0.8.0
+scikit-image==0.25.2
+scipy==1.15.3
+sentry-sdk==2.62.0
+shapely==2.1.2
+shellingham==1.5.4
+six==1.17.0
+smmap==5.0.3
+sympy==1.14.0
+tables==3.10.1
+tensorboardX==2.6.5
+termcolor==3.3.0
+terminaltables==3.1.10
+threadpoolctl==3.6.0
+tifffile==2025.5.10
+timm==1.0.27
+tomli==2.4.1
+torch==2.1.0+cu118
+torchinfo==1.8.0
+torchvision==0.16.0+cu118
+tqdm==4.68.2
+trimesh==4.12.2
+triton==2.1.0
+typer==0.25.1
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2026.2
+ultralytics==8.4.63
+ultralytics-thop==2.0.20
+urllib3==1.26.13
+wandb==0.27.2
+xtcocotools==1.14.3
+yacs==0.1.8
+yapf==0.43.0
