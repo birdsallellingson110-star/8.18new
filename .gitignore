@@ -35,6 +35,16 @@ __pycache__/
 **/.git.bak_upload/
 **/.git/
 
+# Literature repositories are pinned separately in
+# reference/EXTERNAL_REPOSITORIES_20260826.md; do not stage their working trees.
+reference/PointDSC-official/
+reference/Probabilistic-Monocular-3D-Human-Pose-Estimation-with-Normalizing-Flows/
+reference/SimVQ-official/
+reference/differentiable-ransac-official/
+
+# Empty accidental filename retained locally for investigation.
+**三维敏感度驱动的选择性二维纠错
+
 # OS
 .DS_Store
 Thumbs.db
