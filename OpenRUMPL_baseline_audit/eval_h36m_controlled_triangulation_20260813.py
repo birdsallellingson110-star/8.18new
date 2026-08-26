@@ -14,6 +14,7 @@ import argparse
 import itertools
 import json
 import pickle
+import random
 from collections import OrderedDict, defaultdict
 from pathlib import Path
 
@@ -43,6 +44,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-groups", type=int, default=0)
     parser.add_argument("--irls-iters", type=int, default=5)
     parser.add_argument("--huber-threshold-mm", type=float, default=20.0)
+    parser.add_argument("--ransac-iters", type=int, default=10)
+    parser.add_argument("--ransac-epsilon-px", type=float, default=20.0)
+    parser.add_argument("--ransac-seed", type=int, default=42)
+    parser.add_argument(
+        "--pred-only-auto",
+        action="store_true",
+        help=(
+            "Evaluate only predicted 2D in the coordinate system explicitly "
+            "stored by its cache. This skips the four GT/raw diagnostic arms "
+            "and is the fast path for a protocol that already passed them."
+        ),
+    )
+    parser.add_argument(
+        "--algebraic-only",
+        action="store_true",
+        help=(
+            "Evaluate only confidence-weighted algebraic DLT. This avoids the "
+            "much slower per-joint RANSAC/IRLS controls for dense benchmarks."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -167,6 +188,61 @@ def algebraic_dlt(
     return estimates
 
 
+def project_points(projections: np.ndarray, points_3d: np.ndarray) -> np.ndarray:
+    homogeneous = np.concatenate(
+        [points_3d, np.ones((len(points_3d), 1), dtype=np.float64)], axis=1
+    )
+    projected = np.einsum("vab,jb->vja", projections, homogeneous)
+    return projected[..., :2] / np.clip(projected[..., 2:3], 1e-12, None)
+
+
+def adafuse_ransac(
+    projections: np.ndarray,
+    pixels: np.ndarray,
+    iterations: int,
+    epsilon_px: float,
+    rng: random.Random,
+) -> np.ndarray:
+    """Coordinate-equivalent port of AdaFuse's public test-time RANSAC.
+
+    AdaFuse samples two views, keeps the hypothesis with the largest inlier set
+    under a pixel reprojection threshold, then retriangulates all inliers with
+    unweighted DLT.  The upstream implementation uses ``niter=10`` and
+    ``epsilon=20``.  We expose and record the RNG seed because upstream relies
+    on Python's global RNG and does not publish the evaluation seed.
+    """
+    n_views, n_joints = pixels.shape[:2]
+    if n_views < 2:
+        raise ValueError("RANSAC triangulation needs at least two views")
+    estimates = np.empty((n_joints, 3), dtype=np.float64)
+    view_ids = list(range(n_views))
+    unit_conf = np.ones((n_views, n_joints), dtype=np.float64)
+    for joint in range(n_joints):
+        best_inliers: list[int] = []
+        for _ in range(iterations):
+            sampled = sorted(rng.sample(view_ids, 2))
+            hypothesis = algebraic_dlt(
+                projections[sampled], pixels[sampled, joint : joint + 1],
+                unit_conf[sampled, joint : joint + 1]
+            )[0]
+            reprojection = project_points(
+                projections, hypothesis.reshape(1, 3)
+            )[:, 0]
+            errors = np.linalg.norm(reprojection - pixels[:, joint], axis=-1)
+            inliers = np.flatnonzero(errors < epsilon_px).tolist()
+            if len(inliers) > len(best_inliers):
+                best_inliers = inliers
+            if len(best_inliers) == n_views:
+                break
+        if len(best_inliers) < 2:
+            best_inliers = view_ids
+        estimates[joint] = algebraic_dlt(
+            projections[best_inliers], pixels[best_inliers, joint : joint + 1],
+            unit_conf[best_inliers, joint : joint + 1]
+        )[0]
+    return estimates
+
+
 def summarize(errors: np.ndarray, actions: np.ndarray) -> dict:
     # errors: N,J in mm
     per_action = {
@@ -193,6 +269,7 @@ def summarize(errors: np.ndarray, actions: np.ndarray) -> dict:
 
 def main() -> None:
     args = parse_args()
+    ransac_rng = random.Random(args.ransac_seed)
     with open(args.gt_pkl, "rb") as handle:
         gt_groups = group_records(pickle.load(handle))
     with open(args.pred_pkl, "rb") as handle:
@@ -226,7 +303,10 @@ def main() -> None:
                 subset_gt = gt_pixels[list(subset)]
                 subset_conf = confidences[list(subset)]
                 stage = f"V{n_views}"
-                for source, pixels in (("pred2d", subset_pred), ("gt2d", subset_gt)):
+                source_inputs = (("pred2d", subset_pred),) if args.pred_only_auto else (
+                    ("pred2d", subset_pred), ("gt2d", subset_gt)
+                )
+                for source, pixels in source_inputs:
                     # A coordinate cache may already be undistorted and carry
                     # an explicit zero-distortion camera.  Use that camera for
                     # predicted points; otherwise an ``undistort=True`` audit
@@ -239,28 +319,50 @@ def main() -> None:
                         geometry_records = [pred_records[index] for index in subset]
                     else:
                         geometry_records = subset_records
-                    for undistort in (False, True):
-                        tag = "undistorted" if undistort else "raw_distorted"
+                    cache_has_explicit_coordinates = source == "pred2d" and any(
+                        "camera_2d_coordinate_system" in x for x in pred_records
+                    )
+                    coordinate_modes = (
+                        ((False,) if cache_has_explicit_coordinates else (True,))
+                        if args.pred_only_auto else (False, True)
+                    )
+                    for undistort in coordinate_modes:
+                        tag = (
+                            "cache_coordinates" if args.pred_only_auto else
+                            ("undistorted" if undistort else "raw_distorted")
+                        )
                         centers, directions, projections, corrected = make_geometry(
                             geometry_records, pixels, undistort
                         )
-                        estimates = {
-                            f"{source}_{tag}_ray_uniform": solve_ray(
-                                centers, directions, subset_conf, "uniform",
-                                args.irls_iters, args.huber_threshold_mm,
-                            ),
-                            f"{source}_{tag}_ray_confidence": solve_ray(
-                                centers, directions, subset_conf, "confidence",
-                                args.irls_iters, args.huber_threshold_mm,
-                            ),
-                            f"{source}_{tag}_ray_irls": solve_ray(
-                                centers, directions, subset_conf, "irls",
-                                args.irls_iters, args.huber_threshold_mm,
-                            ),
-                            f"{source}_{tag}_algebraic_confidence": algebraic_dlt(
-                                projections, corrected, subset_conf
-                            ),
-                        }
+                        algebraic_key = f"{source}_{tag}_algebraic_confidence"
+                        if args.algebraic_only:
+                            estimates = {
+                                algebraic_key: algebraic_dlt(
+                                    projections, corrected, subset_conf
+                                )
+                            }
+                        else:
+                            estimates = {
+                                f"{source}_{tag}_ray_uniform": solve_ray(
+                                    centers, directions, subset_conf, "uniform",
+                                    args.irls_iters, args.huber_threshold_mm,
+                                ),
+                                f"{source}_{tag}_ray_confidence": solve_ray(
+                                    centers, directions, subset_conf, "confidence",
+                                    args.irls_iters, args.huber_threshold_mm,
+                                ),
+                                f"{source}_{tag}_ray_irls": solve_ray(
+                                    centers, directions, subset_conf, "irls",
+                                    args.irls_iters, args.huber_threshold_mm,
+                                ),
+                                algebraic_key: algebraic_dlt(
+                                    projections, corrected, subset_conf
+                                ),
+                                f"{source}_{tag}_adafuse_ransac": adafuse_ransac(
+                                    projections, corrected, args.ransac_iters,
+                                    args.ransac_epsilon_px, ransac_rng,
+                                ),
+                            }
                         for method, estimate in estimates.items():
                             accum[stage][method].append(
                                 np.linalg.norm(estimate - target, axis=-1)
@@ -276,6 +378,14 @@ def main() -> None:
             "complete_four_view_groups": len(common_keys),
             "irls_iters": args.irls_iters,
             "huber_threshold_mm": args.huber_threshold_mm,
+            "ransac": {
+                "source": "AdaFuse public adafuse_network.py",
+                "iterations": args.ransac_iters,
+                "epsilon_px": args.ransac_epsilon_px,
+                "seed": args.ransac_seed,
+            },
+            "pred_only_auto": args.pred_only_auto,
+            "algebraic_only": args.algebraic_only,
             "predicted_geometry_camera_policy": (
                 "use predicted cache cameras when camera_2d_coordinate_system is present; "
                 "otherwise legacy ground-truth camera behavior"

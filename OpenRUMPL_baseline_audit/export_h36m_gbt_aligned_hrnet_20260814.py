@@ -44,6 +44,11 @@ from mmdet.apis import inference_detector, init_detector
 from mmpose.apis import inference_topdown, init_model
 from mmengine.registry import init_default_scope
 
+from h36m_occlusion_protocol_20260822 import (
+    apply_white_joint_squares,
+    protocol_manifest as occlusion_protocol_manifest,
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -114,6 +119,24 @@ def parse_args() -> argparse.Namespace:
         "--no-undistort",
         action="store_true",
         help="diagnostic only; final GBT-aligned protocol must leave this disabled",
+    )
+    parser.add_argument(
+        "--occlusion-prob",
+        type=float,
+        default=0.0,
+        help="GBT H36M-Occl per-joint white-square probability (paper: 0.1)",
+    )
+    parser.add_argument(
+        "--occlusion-square-fraction",
+        type=float,
+        default=0.15,
+        help="square side / longer annotation-box side; absent from GBT paper",
+    )
+    parser.add_argument(
+        "--occlusion-seed",
+        type=int,
+        default=20260822,
+        help="deterministic mask seed; absent from GBT paper",
     )
     return parser.parse_args()
 
@@ -478,6 +501,8 @@ def selected_indices(total: int, shard_id: int, num_shards: int, max_records: in
 
 def main() -> None:
     args = parse_args()
+    if args.occlusion_prob > 0 and args.no_undistort:
+        raise ValueError("H36M-Occl requires full-image undistortion before masking")
     if args.no_undistort:
         print(
             "WARNING: --no-undistort is a diagnostic protocol; final aligned data must omit it",
@@ -532,6 +557,16 @@ def main() -> None:
                 if args.no_undistort
                 else undistort_full_image(image, K, distortion)
             )
+            occlusion = None
+            if args.occlusion_prob > 0:
+                occlusion = apply_white_joint_squares(
+                    processed,
+                    record,
+                    probability=args.occlusion_prob,
+                    square_fraction=args.occlusion_square_fraction,
+                    seed=args.occlusion_seed,
+                )
+                processed = occlusion.image
             detection = infer_detector(detector, processed)
             detector_fallback = None
             try:
@@ -565,18 +600,21 @@ def main() -> None:
             points, confidence, transform_metadata = infer_pose(
                 pose_model, processed, bbox
             )
-            predictions.append(
-                prediction_entry(
-                    index,
-                    points,
-                    confidence,
-                    bbox,
-                    detector_score,
-                    tuple(processed.shape),
-                    transform_metadata,
-                    detector_fallback,
-                )
+            entry = prediction_entry(
+                index,
+                points,
+                confidence,
+                bbox,
+                detector_score,
+                tuple(processed.shape),
+                transform_metadata,
+                detector_fallback,
             )
+            if occlusion is not None:
+                entry["occlusion_masked_joints_rumpl"] = occlusion.masked_joints
+                entry["occlusion_centers_full_undistorted_xy"] = occlusion.centers_xy
+                entry["occlusion_square_side_px"] = int(occlusion.square_side_px)
+            predictions.append(entry)
         except Exception as exc:
             error = {
                 "record_index": int(index),
@@ -642,6 +680,15 @@ def main() -> None:
             "output_resolution": "original_resolution",
             "distortion_order": "[k1,k2,p1,p2,k3] from camera.k/camera.p",
         },
+        "occlusion": (
+            None
+            if args.occlusion_prob <= 0
+            else occlusion_protocol_manifest(
+                args.occlusion_prob,
+                args.occlusion_square_fraction,
+                args.occlusion_seed,
+            )
+        ),
         "pose_api": "mmpose.apis.inference_topdown",
         "detector_api": "mmdet.apis.inference_detector",
         "bbox_format": "xyxy",

@@ -18,6 +18,7 @@ from __future__ import print_function
 import time
 import logging
 import os
+import re
 import h5py
 import numpy as np
 import collections
@@ -33,6 +34,7 @@ from core.inference import get_final_preds
 from utils.transforms import flip_back
 from utils.vis import save_debug_images
 from core.utils_plot import plot_3d_points, plot_2d_points, plot_3d_points_plotly
+from dataset.gbt_ray_augmentation import replace_with_synthetic_camera_ray
 import random 
 import pickle
 import json
@@ -249,6 +251,40 @@ def train(config, data, model, criterion, optim, epoch, output_dir,
         # ================== model forward ==================
         ratio = get_keep_ratio(0.7, cur_iter, total=total_iter)
         ratio = 0.7 
+        _synthetic_replace_probability = float(os.environ.get(
+            'RUMPL_GBT_SYNTHETIC_REPLACE_PROB', '0'
+        ))
+        if _synthetic_replace_probability > 0:
+            if not config.NETWORK.APPLY_VIEW_FUSION:
+                raise ValueError(
+                    'RUMPL_GBT_SYNTHETIC_REPLACE_PROB requires ray view fusion'
+                )
+            rays, _synthetic_indices = replace_with_synthetic_camera_ray(
+                rays,
+                target,
+                replace_probability=_synthetic_replace_probability,
+                radius_min_m=float(os.environ.get(
+                    'RUMPL_GBT_SYNTHETIC_RADIUS_MIN_M', '3.0'
+                )),
+                radius_max_m=float(os.environ.get(
+                    'RUMPL_GBT_SYNTHETIC_RADIUS_MAX_M', '6.0'
+                )),
+                height_min_m=float(os.environ.get(
+                    'RUMPL_GBT_SYNTHETIC_HEIGHT_MIN_M', '1.0'
+                )),
+                height_max_m=float(os.environ.get(
+                    'RUMPL_GBT_SYNTHETIC_HEIGHT_MAX_M', '2.5'
+                )),
+            )
+            if i == 0:
+                replaced = int((_synthetic_indices >= 0).sum().item())
+                print(
+                    '[GBT_SYNTHETIC_REPLACEMENT] '
+                    f'probability={_synthetic_replace_probability} '
+                    f'replaced_samples={replaced}/{len(_synthetic_indices)} '
+                    'max_replaced_views=1 preserve_total_views=1',
+                    flush=True,
+                )
         # if config.NETWORK.POSEFORMER_OUTPUT_HEAD_KADKHOD:
         #     output, x_intermediate = model(input, centers=centers, rays=rays)
         # elif config.MODEL == 'multiview_transformer_enc_dec':
@@ -1225,7 +1261,21 @@ def evaluate(pred, gt, actual_joints, config, output_dir, conf_3d=None, relative
         
         if per_action:
             action_names = index_to_action_names_h36m()
-            actions = np.array([int(fname.split('_')[3]) for fname in fnames])
+            # H36M action parsing used to assume the exact legacy filename
+            # token layout (``s_09_act_02_...``).  Native CPN records retain
+            # the official ``act_XX`` field, but camera/image suffixes can
+            # differ between annotation producers.  Parse the explicit act
+            # token first and retain the old fallback for legacy files.
+            def _h36m_action(fname):
+                text = str(fname)
+                match = re.search(r'(?:^|_)act_(\d+)(?:_|$)', text)
+                if match is not None:
+                    return int(match.group(1))
+                parts = text.split('_')
+                if len(parts) > 3:
+                    return int(parts[3])
+                raise ValueError('cannot parse H36M action from filename: {!r}'.format(text))
+            actions = np.array([_h36m_action(fname) for fname in fnames])
             mpjpe_per_action = {}
             pjpe_per_action = {}
             distance_per_dim_per_action = {}

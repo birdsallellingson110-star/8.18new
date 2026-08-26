@@ -23,13 +23,32 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--solver-mode", choices=("uniform", "confidence", "irls"),
+        default="confidence",
+        help="Ray solver used for the added candidate branch.",
+    )
     parser.add_argument("--irls-iters", type=int, default=3)
     parser.add_argument("--huber-threshold-m", type=float, default=0.03)
+    parser.add_argument(
+        "--blend-alpha", type=float, default=1.0,
+        help="Blend added geometry with the matching frozen H76 candidate.",
+    )
+    parser.add_argument(
+        "--max-delta-m", type=float, default=0.0,
+        help=(
+            "Clip the geometry-H76 displacement before blending. Zero keeps "
+            "the historical unbounded candidate.")
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not 0.0 <= args.blend_alpha <= 1.0:
+        raise ValueError("blend-alpha must be in [0, 1]")
+    if args.max_delta_m < 0.0:
+        raise ValueError("max-delta-m must be non-negative")
     source = np.load(args.input, allow_pickle=False)
     required = {"group_indices", "actions", "subjects", "predictions", "targets", "rays"}
     missing = required.difference(source.files)
@@ -44,12 +63,22 @@ def main() -> None:
     if rays.shape[1:] != (17, 4, 7):
         raise ValueError(f"unexpected ray shape {rays.shape}")
 
-    confidence = np.stack(
-        [ray_solver(rays, combo, "confidence", args.irls_iters, args.huber_threshold_m)
-         for combo in COMBINATIONS],
+    geometric = np.stack(
+        [ray_solver(
+            rays, combo, args.solver_mode,
+            args.irls_iters, args.huber_threshold_m
+        ) for combo in COMBINATIONS],
         axis=1,
     ).astype(np.float32, copy=False)
-    expanded = np.concatenate((predictions, confidence), axis=1)
+    if args.max_delta_m > 0.0 or args.blend_alpha < 1.0:
+        displacement = geometric - predictions
+        if args.max_delta_m > 0.0:
+            norm = np.linalg.norm(displacement, axis=-1, keepdims=True)
+            displacement = displacement * np.minimum(
+                1.0, args.max_delta_m / np.maximum(norm, 1e-8)
+            )
+        geometric = predictions + args.blend_alpha * displacement
+    expanded = np.concatenate((predictions, geometric), axis=1)
     if expanded.shape[1:] != (2 * len(COMBINATIONS), 17, 3):
         raise RuntimeError(f"unexpected expanded shape {expanded.shape}")
 
@@ -61,18 +90,26 @@ def main() -> None:
     np.savez_compressed(temporary, **payload)
     temporary.replace(output)
     manifest = {
-        "method": "current GBT-style H76 cache + confidence-weighted triangulation",
+        "method": (
+            "current GBT-style H76 cache + optional bounded geometric "
+            "residual candidate"
+        ),
         "input": str(Path(args.input).resolve()),
         "output": str(output),
         "original_candidate_count": len(COMBINATIONS),
         "added_candidate_count": len(COMBINATIONS),
         "candidate_count": int(expanded.shape[1]),
         "candidate_combinations": [list(c) for c in COMBINATIONS] * 2,
-        "added_solver": "confidence",
+        "added_solver": args.solver_mode,
         "irls_iters": args.irls_iters,
         "huber_threshold_m": args.huber_threshold_m,
+        "blend_alpha": args.blend_alpha,
+        "max_delta_m": args.max_delta_m,
         "groups": int(len(expanded)),
-        "generation_note": "targets were not read for candidate generation",
+        "generation_note": (
+            "targets were not read for candidate generation; when enabled, "
+            "the added branch is clipped and anchored to matching H76"
+        ),
     }
     output.with_suffix(".json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

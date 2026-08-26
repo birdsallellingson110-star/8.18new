@@ -37,7 +37,14 @@ class PreVFTTemporalAdapter(nn.Module):
     identity around a pretrained RUMPL checkpoint.
     """
 
-    def __init__(self, dim: int, num_heads: int, depth: int, temporal_length: int):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        depth: int,
+        temporal_length: int,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         if depth < 1:
             raise ValueError("pre-vft temporal depth must be positive")
@@ -45,6 +52,8 @@ class PreVFTTemporalAdapter(nn.Module):
             raise ValueError(
                 f"temporal token dimension {dim} is not divisible by {num_heads} heads"
             )
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
         self.temporal_pos_embed = nn.Parameter(
             torch.zeros(1, temporal_length, dim)
         )
@@ -55,8 +64,8 @@ class PreVFTTemporalAdapter(nn.Module):
                     num_heads=num_heads,
                     mlp_ratio=2.0,
                     qkv_bias=True,
-                    drop=0.0,
-                    attn_drop=0.0,
+                    drop=dropout,
+                    attn_drop=dropout,
                     drop_path=0.0,
                 )
                 for _ in range(depth)
@@ -202,6 +211,7 @@ class TemporalJointViewRUMPL(nn.Module):
                 num_heads=num_heads,
                 depth=depth,
                 temporal_length=self.temporal_length,
+                dropout=min(self.token_dropout, 0.10),
             )
         self.joint_embedding = nn.Parameter(
             torch.zeros(1, 1, self.num_joints, 1, self.dim)
@@ -680,6 +690,28 @@ class TemporalJointViewRUMPL(nn.Module):
         root_mask[:, :, 0] = 0.0
         return correction * root_mask
 
+    def _drop_joint_view_tokens(self, token: torch.Tensor) -> torch.Tensor:
+        """GBT-style token dropout on (joint, view) tracks before VFT.
+
+        Each dropped token is zeroed, matching GBT's padding mask.  At least
+        one view is kept for every joint-frame so VFT still has a valid set.
+        Evaluation is unchanged: dropout is training-only.
+        """
+
+        if not (self.training and self.token_dropout > 0):
+            return token
+        batch, time, joints, views, _ = token.shape
+        drop = torch.rand(
+            batch, time, joints, views, device=token.device
+        ) < self.token_dropout
+        if views > 1:
+            all_dropped = drop.all(dim=-1)
+            if bool(all_dropped.any()):
+                idx = all_dropped.nonzero(as_tuple=False)
+                keep = torch.randint(views, (len(idx),), device=token.device)
+                drop[idx[:, 0], idx[:, 1], idx[:, 2], keep] = False
+        return token.masked_fill(drop[..., None], 0.0)
+
     def forward(
         self,
         rays: torch.Tensor,
@@ -749,6 +781,11 @@ class TemporalJointViewRUMPL(nn.Module):
         elif self.fusion_mode == "pre-vft-temporal":
             # Keep the camera axis intact until the original RUMPL VFT.  The
             # adapter only sees each (joint, view) trajectory through time.
+            # GBT trains with 20% token dropout; H8 left that on unused JVT
+            # blocks.  Dropping (joint, view) tokens here is the occlusion
+            # analogue: a missing observation in one frame can still be
+            # recovered from the same ray track at other times.
+            token = self._drop_joint_view_tokens(token)
             token = self.pre_vft_temporal(token)
             token = self._rumpl_vft(token)
             output = self._rumpl_pft_and_head(token)

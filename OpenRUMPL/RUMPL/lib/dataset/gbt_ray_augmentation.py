@@ -106,6 +106,65 @@ def append_synthetic_camera_rays(
     return torch.cat([rays, synthetic], dim=3)
 
 
+def replace_with_synthetic_camera_ray(
+    rays: torch.Tensor,
+    target: torch.Tensor,
+    replace_probability: float,
+    radius_min_m: float,
+    radius_max_m: float,
+    height_min_m: float,
+    height_max_m: float,
+    neck_index: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Replace at most one real view per sample by a virtual-camera GT ray.
+
+    Single-frame RUMPL has a fixed four-view capacity before its internal 2--4
+    view sampler. Replacement retains that capacity and guarantees that every
+    two-view input can contain at most one synthetic view.
+
+    Returns augmented rays and a ``(B,)`` camera-index tensor; ``-1`` denotes
+    a sample that was not augmented.
+    """
+
+    if rays.ndim != 4 or rays.shape[-1] < 7:
+        raise ValueError(f"expected rays (B,J,V,>=7), got {tuple(rays.shape)}")
+    if target.ndim != 3 or target.shape[-1] != 3:
+        raise ValueError(f"expected target (B,J,3), got {tuple(target.shape)}")
+    if rays.shape[:2] != target.shape[:2]:
+        raise ValueError("rays and target must share batch/joint dimensions")
+    if rays.shape[2] < 2:
+        raise ValueError("synthetic replacement requires at least two real views")
+    if not 0.0 <= replace_probability <= 1.0:
+        raise ValueError("replace_probability must be in [0, 1]")
+
+    batch, _, views, _ = rays.shape
+    replaced_index = torch.full(
+        (batch,), -1, device=rays.device, dtype=torch.long
+    )
+    active = torch.rand(batch, device=rays.device) < replace_probability
+    if not active.any():
+        return rays, replaced_index
+
+    augmented = append_synthetic_camera_rays(
+        rays[:, None], target[:, None],
+        num_synthetic_views=1,
+        radius_min_m=radius_min_m,
+        radius_max_m=radius_max_m,
+        height_min_m=height_min_m,
+        height_max_m=height_max_m,
+        neck_index=neck_index,
+    )[:, 0]
+    synthetic = augmented[:, :, views]
+    output = rays.clone()
+    rows = active.nonzero(as_tuple=False).flatten()
+    camera_indices = torch.randint(
+        views, (rows.numel(),), device=rays.device
+    )
+    output[rows, :, camera_indices, :] = synthetic[rows]
+    replaced_index[rows] = camera_indices
+    return output, replaced_index
+
+
 def sample_scene_transform(
     target: torch.Tensor,
     planar_noise_std_m: float,

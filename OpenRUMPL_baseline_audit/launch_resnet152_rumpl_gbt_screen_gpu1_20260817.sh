@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Stage 2 (single free GPU): official LT ResNet-152 coordinate frontend,
-# followed by the same RUMPL R0/H76 controls used by the HRNet line.
-# GPU0 is intentionally untouched because another experiment is using it.
+# Stage 2: official LT ResNet-152 coordinate frontend, followed by the same
+# RUMPL R0/H76 controls used by the HRNet line. The two controls run in
+# parallel on GPU0/GPU1 after the frozen frontend export has been verified.
 set -euo pipefail
 
 PY=/home/lixiaob/cjy/rumpl_venv310/bin/python
@@ -19,7 +19,7 @@ LT_SCRIPT=${AUDIT}/eval_lt_official_on_rumpl_h36m_20260813.py
 LT_CONFIG=/home/lixiaob/cjy/reference/learnable-triangulation-official/experiments/human36m/eval/human36m_alg.yaml
 LT_CHECKPOINT=/mnt/data/cjyoutput/open_source_fusion_audit_20260731/pretrained/pose_resnet_4.5_pixels_human36m_mmpose.pth
 IMAGES=${DATA_ROOT}/images
-GPU=1
+FRONTEND_GPU=1
 
 mkdir -p "${FRONTEND}/train" "${FRONTEND}/validation" "${TYPE_DIR}" "${OUT}/logs"
 test -s "${CFG}"; test -s "${LT_SCRIPT}"; test -s "${LT_CONFIG}"; test -s "${LT_CHECKPOINT}"
@@ -39,8 +39,8 @@ export_frontend() {
     return
   fi
   test -s "${input}"
-  echo "[RES152-GPU1] exporting ${split} on GPU ${GPU}"
-  CUDA_VISIBLE_DEVICES="${GPU}" "${PY}" -u "${LT_SCRIPT}" \
+  echo "[RES152-GPU1] exporting ${split} on GPU ${FRONTEND_GPU}"
+  CUDA_VISIBLE_DEVICES="${FRONTEND_GPU}" "${PY}" -u "${LT_SCRIPT}" \
     --pkl "${input}" --image-root "${IMAGES}" \
     --checkpoint "${LT_CHECKPOINT}" --config "${LT_CONFIG}" \
     --output "${report}" --export-only \
@@ -72,8 +72,8 @@ for split in train validation; do
 done
 
 run_one() {
-  local variant="$1" tri="$2" centered="$3" plucker="$4"
-  local tag="RES152_GPU1_${variant}_LT_GBT_COORD_${TYPE}_seed0_20260817"
+  local variant="$1" gpu="$2" tri="$3" centered="$4" plucker="$5"
+  local tag="RES152_GPU${gpu}_${variant}_LT_GBT_COORD_${TYPE}_seed0_20260821"
   local root="${OUT}/rumpl/${variant}"
   local log="${root}/${tag}.log"
   local done="${root}/${tag}.done"
@@ -83,7 +83,7 @@ run_one() {
     return
   fi
   (
-    export CUDA_VISIBLE_DEVICES="${GPU}"
+    export CUDA_VISIBLE_DEVICES="${gpu}"
     export PYTHONPATH="${AUDIT}"
     export RUMPL_FIX_SCHEDULER_ORDER=1 RUMPL_RANDOM_VIEW_SUBSET=1
     export TRAIN_FIXED_NUM_VIEWS=2 TRAIN_FIXED_NUM_VIEWS_EPOCHS=8
@@ -108,7 +108,7 @@ run_one() {
     export CAA_LAMBDA=0 DEPRO_LAMBDA=0 REPROJ_LAMBDA=0 RAY_LAMBDA=0 BONE_LAMBDA=0
     export MONO_W=0 MONO_GT_W=0 RUMPL_TRAIN_SCOPE=all
     {
-      echo "variant=${variant} gpu=${GPU} tag=${tag} start=$(date --iso-8601=seconds)"
+      echo "variant=${variant} gpu=${gpu} tag=${tag} start=$(date --iso-8601=seconds)"
       echo "input_type=${TYPE}; frontend=official LT ResNet-152; source train/val=${FRONTEND}"
       echo "variables=tri_anchor:${tri},centered:${centered},plucker:${plucker}; coordinate-only"
       sha256sum "${CFG}" "${FRONTEND}/train/h36m_train_res152.pkl" "${FRONTEND}/validation/h36m_validation_res152.pkl"
@@ -142,6 +142,10 @@ run_one() {
 }
 
 # R0 is the plain coordinate control; H76 is the planned geometry control.
-run_one R0 0 0 0
-run_one H76 1 1 1
+# They share the frozen ResNet frontend but have independent RUMPL checkpoints.
+run_one R0 0 0 0 0 &
+pid_r0=$!
+run_one H76 1 1 1 1 &
+pid_h76=$!
+wait "${pid_r0}" "${pid_h76}"
 echo "[RES152-GPU1] complete $(date --iso-8601=seconds)"

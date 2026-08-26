@@ -242,6 +242,130 @@ def center_ray_points_on_anchor(points, anchors, per_joint=False):
     return points - center
 
 
+def equivariant_body_canonicalize_rays(
+    rays,
+    regularization=1e-4,
+    confidence_epsilon=0.05,
+    pelvis_prior=False,
+    robust_torso=False,
+):
+    """Express calibrated rays in a pelvis/shoulder/torso body frame.
+
+    The frame is estimated only from confidence-weighted ray intersections.
+    The Tikhonov prior is centred on a point-on-ray centroid rather than the
+    arbitrary world origin, so the complete construction is SE(3)-equivariant.
+    H36M-17 indices 0/8/11/14 denote pelvis, neck, left shoulder and right
+    shoulder.  With ``robust_torso=True``, both shoulder and hip pairs define
+    the horizontal axis and the torso midpoints replace the detector-dependent
+    virtual neck.  Metric scale is deliberately preserved.
+
+    Returns the canonical rays together with the world-space origin and basis
+    needed to map a predicted canonical pose back to world coordinates.
+    """
+    if rays.ndim != 4 or rays.shape[1] != 17 or rays.shape[-1] < 7:
+        raise ValueError(
+            'body canonicalization requires rays shaped (B,17,V,>=7)'
+        )
+    direction = F.normalize(rays[..., :3], dim=-1, eps=1e-7)
+    point = rays[..., 3:6]
+    confidence = rays[..., 6:7].clamp(0, 1) + confidence_epsilon
+    eye = torch.eye(3, device=rays.device, dtype=rays.dtype)
+    projection = eye - direction.unsqueeze(-1) * direction.unsqueeze(-2)
+    weighted_projection = confidence.unsqueeze(-1) * projection
+    lhs = weighted_projection.sum(dim=2)
+    rhs = (weighted_projection @ point.unsqueeze(-1)).sum(dim=2)
+    centroid = (
+        (confidence * point).sum(dim=2)
+        / confidence.sum(dim=2).clamp_min(1e-7)
+    )
+    if pelvis_prior:
+        # Near-parallel two-view rays make independently triangulated shoulder
+        # and neck anchors unstable.  A pelvis-centred Tikhonov prior keeps the
+        # body-frame construction SE(3)-equivariant while damping precisely
+        # those ill-conditioned intersections.  The default-off branch below
+        # remains numerically identical to established checkpoints.
+        pelvis_lhs = lhs[:, 0] + regularization * eye
+        pelvis_rhs = (
+            rhs[:, 0]
+            + regularization * centroid[:, 0].unsqueeze(-1)
+        )
+        pelvis = torch.linalg.solve(pelvis_lhs, pelvis_rhs).squeeze(-1)
+        lhs = lhs + regularization * eye
+        rhs = rhs + regularization * pelvis[:, None, :, None]
+        anchors = torch.linalg.solve(lhs, rhs).squeeze(-1)
+    else:
+        lhs = lhs + regularization * eye
+        rhs = rhs + regularization * centroid.unsqueeze(-1)
+        anchors = torch.linalg.solve(lhs, rhs).squeeze(-1)
+
+    origin = anchors[:, 0]
+    shoulder = F.normalize(
+        anchors[:, 14] - anchors[:, 11], dim=-1, eps=1e-7
+    )
+    if robust_torso:
+        # Lower-body left/right conventions have historically varied across
+        # detector PKLs.  Aligning the hip vector to the shoulder vector is
+        # permutation-, camera- and dataset-ID-free and avoids baking that
+        # frontend convention into the canonical frame.
+        hip = F.normalize(anchors[:, 4] - anchors[:, 1], dim=-1, eps=1e-7)
+        hip_alignment = torch.where(
+            (hip * shoulder).sum(dim=-1, keepdim=True) < 0,
+            -torch.ones_like(hip[..., :1]),
+            torch.ones_like(hip[..., :1]),
+        )
+        hip = hip * hip_alignment
+        mean_confidence = confidence.squeeze(-1).mean(dim=2)
+        shoulder_weight = torch.sqrt(
+            mean_confidence[:, 14] * mean_confidence[:, 11]
+        ).unsqueeze(-1)
+        hip_weight = torch.sqrt(
+            mean_confidence[:, 1] * mean_confidence[:, 4]
+        ).unsqueeze(-1)
+        x_axis = F.normalize(
+            shoulder_weight * shoulder + hip_weight * hip,
+            dim=-1,
+            eps=1e-7,
+        )
+        shoulder_mid = 0.5 * (anchors[:, 11] + anchors[:, 14])
+        hip_mid = 0.5 * (anchors[:, 1] + anchors[:, 4])
+        up_hint = shoulder_mid - hip_mid
+    else:
+        # Keep the established path bit-for-bit unchanged when the new option
+        # is disabled so existing checkpoints and results remain reproducible.
+        x_axis = shoulder
+        up_hint = anchors[:, 8] - origin
+    y_axis = up_hint - (
+        up_hint * x_axis
+    ).sum(dim=-1, keepdim=True) * x_axis
+    y_axis = F.normalize(y_axis, dim=-1, eps=1e-7)
+    z_axis = F.normalize(
+        torch.cross(x_axis, y_axis, dim=-1), dim=-1, eps=1e-7
+    )
+    y_axis = F.normalize(
+        torch.cross(z_axis, x_axis, dim=-1), dim=-1, eps=1e-7
+    )
+    # Columns are canonical basis vectors expressed in world coordinates.
+    basis = torch.stack((x_axis, y_axis, z_axis), dim=-1)
+
+    canonical = rays.clone()
+    canonical[..., :3] = torch.einsum(
+        'b...i,bij->b...j', rays[..., :3], basis
+    )
+    centered_point = rays[..., 3:6] - origin[:, None, None, :]
+    canonical[..., 3:6] = torch.einsum(
+        'b...i,bij->b...j', centered_point, basis
+    )
+    return canonical, origin, basis
+
+
+def body_canonical_pose_to_world(pose, origin, basis):
+    """Invert :func:`equivariant_body_canonicalize_rays` for a 3D pose."""
+    return (
+        torch.einsum('b...j,bij->b...i', pose, basis)
+        + origin[:, None, :]
+    )
+
+
 def build_h36m17_adjacency(num_joints=17):
     """Return a symmetric, row-normalized H36M-17 kinematic adjacency."""
     parents = (-1, 0, 1, 2, 0, 4, 5, 0, 7, 8, 9, 8, 11, 12, 8, 14, 15)
@@ -912,6 +1036,21 @@ class MultiView_RUMPL(nn.Module):
         self.tri_anchor_conf_eps = float(
             os.environ.get('RUMPL_TRI_ANCHOR_CONF_EPS', '0.05')
         )
+        # GHT-style pose standardization moved in front of the complete RUMPL
+        # generator.  It is opt-in and parameter-free, so all established
+        # checkpoints and default runs remain numerically unchanged.
+        self.body_canonical_frame = (
+            os.environ.get('RUMPL_BODY_CANONICAL_FRAME', '0') == '1'
+        )
+        self.body_canonical_reg = float(
+            os.environ.get('RUMPL_BODY_CANONICAL_REG', '1e-4')
+        )
+        self.body_canonical_pelvis_prior = (
+            os.environ.get('RUMPL_BODY_CANONICAL_PELVIS_PRIOR', '0') == '1'
+        )
+        self.body_canonical_robust_torso = (
+            os.environ.get('RUMPL_BODY_CANONICAL_ROBUST_TORSO', '0') == '1'
+        )
         self.anchor_centered_rays = (
             os.environ.get('RUMPL_ANCHOR_CENTERED_RAYS', '0') == '1'
         )
@@ -945,6 +1084,18 @@ class MultiView_RUMPL(nn.Module):
             raise ValueError('GBT_GLOBAL_JV_BIASED requires GBT_GLOBAL_JV_DEPTH > 0')
         if self.anchor_centered_rays and not self.tri_anchor:
             raise ValueError('RUMPL_ANCHOR_CENTERED_RAYS requires RUMPL_TRI_ANCHOR=1')
+        if self.body_canonical_frame and not self.tri_anchor:
+            raise ValueError('RUMPL_BODY_CANONICAL_FRAME requires RUMPL_TRI_ANCHOR=1')
+        if self.body_canonical_pelvis_prior and not self.body_canonical_frame:
+            raise ValueError(
+                'RUMPL_BODY_CANONICAL_PELVIS_PRIOR requires '
+                'RUMPL_BODY_CANONICAL_FRAME=1'
+            )
+        if self.body_canonical_robust_torso and not self.body_canonical_frame:
+            raise ValueError(
+                'RUMPL_BODY_CANONICAL_ROBUST_TORSO requires '
+                'RUMPL_BODY_CANONICAL_FRAME=1'
+            )
         if self.anchor_center_per_joint and not self.anchor_centered_rays:
             raise ValueError('RUMPL_ANCHOR_CENTER_PER_JOINT requires RUMPL_ANCHOR_CENTERED_RAYS=1')
         if self.post_pft_geometry_conditional_residual and not self.tri_anchor:
@@ -1541,6 +1692,8 @@ class MultiView_RUMPL(nn.Module):
         b, num_joints, num_points, d = x.shape
         mtf_source_norm_fused = False
         tri_anchor_point = None
+        body_canonical_origin = None
+        body_canonical_basis = None
         geometry_uncertainty = None
         _raw_dir = None
         _raw_int = None
@@ -1700,6 +1853,33 @@ class MultiView_RUMPL(nn.Module):
                         flush=True,
                     )
                     self._normalize_view_confidence_logged = True
+
+            if self.body_canonical_frame:
+                if self.use_only_2D or self.feed_camera_calibration:
+                    raise RuntimeError(
+                        'RUMPL_BODY_CANONICAL_FRAME requires calibrated ray input'
+                    )
+                x, body_canonical_origin, body_canonical_basis = (
+                    equivariant_body_canonicalize_rays(
+                        x,
+                        regularization=self.body_canonical_reg,
+                        confidence_epsilon=self.tri_anchor_conf_eps,
+                        pelvis_prior=self.body_canonical_pelvis_prior,
+                        robust_torso=self.body_canonical_robust_torso,
+                    )
+                )
+                if not hasattr(self, '_body_canonical_frame_logged'):
+                    print(
+                        '[BODY_CANONICAL_FRAME] enabled=1 '
+                        'origin=triangulated_pelvis axes=shoulder_torso '
+                        'pelvis_prior={} robust_torso={} '
+                        'scale=metric output=inverse_world_transform'.format(
+                            int(self.body_canonical_pelvis_prior),
+                            int(self.body_canonical_robust_torso),
+                        ),
+                        flush=True,
+                    )
+                    self._body_canonical_frame_logged = True
                 
             if self.use_only_2D:
                 joints_2d = x[:, :, :, :2]
@@ -2048,6 +2228,11 @@ class MultiView_RUMPL(nn.Module):
                 set_output = self.GBT_set_head(decoded)
                 if tri_anchor_point is not None:
                     set_output = set_output + tri_anchor_point
+                if body_canonical_origin is not None:
+                    set_output = body_canonical_pose_to_world(
+                        set_output, body_canonical_origin,
+                        body_canonical_basis,
+                    )
                 return set_output
 
             skeleton_view_logits = None
@@ -2612,6 +2797,10 @@ class MultiView_RUMPL(nn.Module):
                 )
                 self._gbt_query_residual_logged = True
 
+        if body_canonical_origin is not None:
+            x = body_canonical_pose_to_world(
+                x, body_canonical_origin, body_canonical_basis
+            )
         return x
 
 

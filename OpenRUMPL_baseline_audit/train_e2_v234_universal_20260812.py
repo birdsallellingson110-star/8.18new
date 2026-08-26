@@ -48,6 +48,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--attention-depth", type=int, choices=(1, 2, 3, 4), default=2)
     parser.add_argument(
+        "--canonical-geometry", action="store_true",
+        help="Score candidates in the ray-derived pelvis/shoulder/torso frame.",
+    )
+    parser.add_argument(
+        "--fixed-metric-normalization", action="store_true",
+        help="Use fixed isotropic metre scaling instead of H36M mean/std.",
+    )
+    parser.add_argument(
         "--stage-heads", action="store_true",
         help="Use separate utility calibration heads for V2/V3/V4 while sharing the encoder.",
     )
@@ -290,7 +298,9 @@ def main() -> None:
     mean = torch.from_numpy(train["targets"][train_indices].mean(axis=(0, 1)))
     std = torch.from_numpy(train["targets"][train_indices].std(axis=(0, 1)))
     model = SetTransformerJointUtility(
-        mean, std, args.attention_depth, stage_heads=args.stage_heads
+        mean, std, args.attention_depth, stage_heads=args.stage_heads,
+        canonical_geometry=args.canonical_geometry,
+        fixed_metric_normalization=args.fixed_metric_normalization,
     ).to(device)
     train_loader = DataLoader(
         ArrayDataset(train, train_indices), batch_size=args.batch_size, shuffle=True,
@@ -352,6 +362,8 @@ def main() -> None:
                 "attention_depth": args.attention_depth, "epoch": epoch,
                 "phase": phase, "candidate_count": expected,
                 "stage_heads": args.stage_heads,
+                "canonical_geometry": args.canonical_geometry,
+                "fixed_metric_normalization": args.fixed_metric_normalization,
                 "candidate_combinations": [list(item) for item in ALL_CANDIDATE_COMBINATIONS],
                 "temperature": args.temperature,
             }, checkpoint_path)
@@ -364,6 +376,8 @@ def main() -> None:
         "method": "E2 universal Set Transformer utility fusion",
         "active_task_cardinalities": sorted({len(combo) for combo in TASK_COMBINATIONS}),
         "stage_heads": args.stage_heads,
+        "canonical_geometry": args.canonical_geometry,
+        "fixed_metric_normalization": args.fixed_metric_normalization,
         "paper_basis": [
             "GHT-style stochastic hypothesis scoring (CVPR 2022)",
             "confidence-weighted/IRLS triangulation controls",

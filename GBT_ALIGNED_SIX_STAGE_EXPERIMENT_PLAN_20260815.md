@@ -1,4 +1,13 @@
-# GBT 对齐的六阶段论文实验计划（2026-08-15）
+# GBT 对齐的六阶段论文实验计划（2026-08-15 历史版）
+
+> **2026-08-22 覆盖声明：**本文件保留旧 HRNet/E2-C2 路线和历史实验，不再作为
+> 当前 baseline 的执行源。当前已升级为七阶段路线，统一模型为
+> `GQ-RUMPL → GQ-RUMPL-E2 → GQ-RUMPL-E2-T`，HRNet/ResNet 只替换冻结 2D
+> 前端。最新技术协议、状态和全部 GBT 表格见
+> `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/JOINT_QUERY_MATCHED_FRONTENDS_PLAN_20260822.md`；
+> 可直接交给 Codex 的母稿见
+> `/home/lixiaob/cjy/PAPER_MASTER_STORY_METHOD_RESULTS_CODE_20260815.md` 文首 A/B 节。
+> 下文数值只可作为历史失败/消融资料，不得与当前 matched pipeline 拼接。
 
 ## 0. 总体决定
 
@@ -670,3 +679,249 @@ oracle。全验证集为 2,021 帧、200 假设，输出：
 二者不是 ensemble 或后处理叠加；目的是判定当前 V2/V4 差距来自视角采样优化，还是
 来自模型候选本身。完成后只保留严格三列均下降或在目标列有可复现收益的线，随后再
 决定是否恢复 ResNet 或进入 T=9 时序实验。
+
+### 51.1 G1/G2 最终严格结果与决策
+
+G1/G2 均完成 20 轮训练。G1 原启动脚本在训练结束后因运行期间脚本行号变化导致
+shell 解析错误，但训练权重完整保存；使用独立只评估脚本
+`OpenRUMPL_baseline_audit/eval_g1_h1_balanced_strict_20260818.sh` 恢复了完全相同
+环境下的 V2/V3/V4 严格结果，不需要重训。
+
+| 方法 | V2 | V3 | V4 | 相对 H1 raw |
+|---|---:|---:|---:|---:|
+| H1 raw（继续训练起点） | **36.885** | **31.451** | **30.277** | — |
+| G1，1:1:1 | 36.988 | 31.523 | 30.290 | `+0.104/+0.072/+0.013` |
+| G2，5:1:1 | 37.034 | 31.548 | 30.426 | `+0.150/+0.097/+0.149` |
+| E2-C2 soft-cal（冻结 T=1 参考） | 38.700 | **29.486** | **27.274** | 不同候选生成器 |
+| GBT HRNet（T=9） | 36.800 | 30.400 | 26.000 | 外部参考 |
+
+两种采样续训均在三列退化，说明 H1 已在该训练目标附近饱和；当前缺口不是
+V2/V3/V4 出现频率不足。停止继续扫描采样权重、学习率或延长 H1，不对 G1/G2 再训练
+E2。HRNet 单帧主参考保持 E2-C2 soft-cal `38.700/29.486/27.274 mm`，H1 raw 只作为
+V2 优先消融。
+
+下一步不切换 ResNet，先补齐与 GBT 公平比较缺失的 T=9：在冻结 E2-C2 候选与绝对
+anchor 路径上，做 candidate-level temporal go/no-go。第一步先计算训练 holdout 的
+T=9 temporal candidate oracle；只有 V2 或 V4 上限改善至少 `1.0 mm` 才训练 MTF-TFT
+式、零初始化 identity residual/utility gate。该实验不再对最终 3D pose 做 MixSTE
+平滑，也不重复已失败的 Pre-VFT temporal。若 temporal oracle 不足，则正式冻结 HRNet
+线并恢复已导出的 ResNet-152 R0/H76 对照。
+
+## 52. H15/H16：T=9 候选时序 go/no-go（2026-08-18，已完成）
+
+根据当前决策，ResNet-152 阶段暂停；在 HRNet 线达到 GBT 目标前不得切换输入前端。
+H15/H16 只在当前 C2 候选池上验证“时序是否能解决候选选择问题”，不改变 HRNet、
+RUMPL H76、三角化候选、相机或 E2 单帧 scorer。
+
+### 52.1 H15：零训练 temporal candidate oracle
+
+输出目录：`/mnt/data/cjyoutput/gbt_aligned_hrnet_20260818/h15_temporal_c2_oracle/`；
+脚本：`audit_temporal_candidate_oracle_20260818.py`。验证使用完整 S9/S11 dense
+T=9 pkl（26,269 个同步中心），窗口帧间隔 5；候选生成不读标签，标签只用于 oracle
+评估。结果为 action-equal All-17 absolute MPJPE（mm）：
+
+| 窗口 | V2 原始 C2 | V2 中心帧 oracle | V2 时序均值 oracle | V3 原始 | V3 中心 oracle | V3 时序 oracle | V4 原始 | V4 中心 oracle | V4 时序 oracle |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| T=1 | 38.718 | 36.205 | 36.205 | 30.947 | 21.732 | 21.732 | 28.623 | 17.044 | 17.044 |
+| T=3 | 38.740 | 36.224 | 36.764 | 30.966 | 21.744 | 23.057 | 28.641 | 17.053 | 18.679 |
+| T=5 | 38.763 | 36.244 | 37.007 | 30.987 | 21.756 | 23.640 | 28.658 | 17.063 | 19.371 |
+| T=9 | 38.809 | 36.284 | 37.309 | 31.028 | 21.782 | 24.393 | 28.694 | 17.083 | 20.251 |
+
+中心帧候选池仍有较大理论余量，但按时间平均误差选候选在 T=9 比中心 oracle
+退化 `+1.025/+2.610/+3.168 mm`（V2/V3/V4）。这说明“跨帧平均误差”不是可用的
+时序效用定义，不能把它写成时序提升证据。
+
+### 52.2 H16：短程、零初始化 temporal utility residual
+
+脚本：`train_temporal_e2_c2_screen_20260818.py`，启动脚本：
+`launch_h16_temporal_c2_screen_20260818.sh`；输出目录：
+`/mnt/data/cjyoutput/gbt_aligned_hrnet_20260818/h16_temporal_c2_screen/`。
+冻结经过校准的 E2-C2 scorer（T2/T3/T4 temperature = 0.4/1.8/1.8），只训练一个
+T=9 candidate-level Transformer residual；残差头零初始化，所以训练前严格等于
+E2-C2。训练窗口均匀抽样 S1/S5/S6/S7，S8 作为内部 holdout，S9/S11 只最终评估。
+
+T=9 baseline（完整验证集）为 `38.809/31.028/28.694 mm`。短程训练在 S8
+holdout 的均值从 baseline `15.281` 变为最佳 `15.333 mm`，没有通过 identity floor；
+因此没有保存可部署时序权重，最终验证仍为 baseline：
+
+| 方法 | V2 | V3 | V4 | 结论 |
+|---|---:|---:|---:|---|
+| E2-C2 T=9 frozen | 38.809 | 31.028 | 28.694 | control |
+| H16 residual（最终无增益，未保留） | 38.809 | 31.028 | 28.694 | stop |
+
+H15/H16 的共同结论是：当前候选池的瓶颈是单帧候选效用可识别性，而不是缺少一个
+时序平滑器；在没有单帧效用提升前继续扩大时序模型没有依据。该结论不等于“论文中
+时序无效”，而是说明当前 HRNet/RUMPL 输入上的时序分支尚未看到可学习的正增益。
+
+## 53. 下一步：H17 V2 pairwise candidate utility（不切 ResNet）
+
+在用户明确要求“未达目标前不能转 ResNet”后，下一步固定 HRNet 前端，针对最紧迫的
+V2 缺口 `38.700 -> 36.8` 做单变量、单帧实验。H17 只处理每个两视角任务中的两个
+同视角候选（H76 与 confidence-weighted triangulation），以 GHT 的 hypothesis
+scoring 思想为依据，但将输入限制为坐标级、置信度和射线几何：候选 root-relative
+坐标、候选间位移/范数、视角置信度、候选到射线的垂距以及冻结 E2 score。
+
+训练目标仍是训练集真值 3D 监督下的 candidate error-delta/ranking，不使用 teacher
+prediction、蒸馏或验证标签；输出 residual 零初始化，严格保留 E2-C2 为 identity
+control。只在 S8 holdout 选择，S9/S11 最终一次评估。通过门槛为：
+
+1. V2 相对 E2-C2 至少下降 1.0 mm 且不超过 0.2 mm 退化于 V3/V4；
+2. 六个两视角组合中至少四个组合下降，不能只靠单个相机对；
+3. 若未达到门槛，停止继续调 scorer，转做有明确候选上限支持的稳健求解器/视角
+   负增益分析；ResNet-152 仍保持冻结，直到 HRNet 线先达到既定 GBT 目标。
+
+### 53.1 H17 结果（2026-08-18，已完成）
+
+H17 使用完整训练缓存中的 S1/S5/S6/S7，S8 做选择，S9/S11 只做最终一次评估；
+15E、batch 1024。冻结 E2-C2 的 T=1 baseline 在当前 dense 验证上的 V2 为
+`38.718 mm`（六个相机对平均），pairwise residual 最终为 `38.737 mm`，即
+`+0.019 mm`，没有收益；六个相机对也没有形成一致下降。结果目录：
+`/mnt/data/cjyoutput/gbt_aligned_hrnet_20260818/h17_v2_pairwise_utility/`。
+
+训练/验证分布还暴露出一个重要诊断：confidence candidate 在训练主体上的逐关节
+胜率只有约 `7.4%--9.0%`，而 S9/S11 为 `10.5%--24.4%`（S9 明显更高）。因此
+H17 scorer 在训练中学到“保留 H76”是合理的，但无法迁移到 S9，说明当前候选质量
+存在 subject/domain shift；这不是再堆一个 Transformer 就能解决的。后续若再做
+候选效用，必须先做无标签域稳定性/校准实验，并按相机对报告结果，不能把 H15
+oracle 直接当作可实现精度。
+
+H17 未达到门槛，保留 E2-C2 `38.700/29.486/27.274` 作为统一 HRNet T=1 参考，
+同时保留 dense T=9 control `38.809/31.028/28.694`。时序和 V2 scorer 两条支线
+均暂停；ResNet-152 仍不启动。
+
+## 54. H18：正常帧优先的 E2-C2 temporal pose residual（2026-08-18，执行中）
+
+### 54.1 重新启动的原因
+
+用户要求时序不能只在遮挡下有效，正常 H36M 也必须有可测的下降。H16 不能作为
+这个问题的否定证据：它只训练了 4096 个窗口、4 个 epoch，而且 temporal 分支
+只改候选 utility logits，没有直接修正中心 3D pose。更关键的是，H16 的
+`baseline` 字段记录的是原始 H76 候选误差，`temporal` 字段才是 E2 soft pose，
+因此两者不是同一基线口径。H18 修正了这一评估错误。
+
+### 54.2 实验定义
+
+冻结当前 E2-C2 的 22 候选、评分器和已选温度（V2/V3/V4 = 0.4/1.8/1.8），
+先离线生成与正式推理一致的每帧 soft-fusion 3D pose。新模块是 MixSTE 风格的
+spatial block → temporal block 分解，输入 T=9 个连续稀疏帧的 11 个视角任务
+输出，直接预测中心帧 3D residual；最后一层零初始化，step 0 严格等于 E2-C2。
+clean control 中固定 root，避免收益来自重写相机几何的绝对平移。
+
+训练使用完整 S1/S5/S6/S7 窗口，S8 整个 subject 只用于 checkpoint 选择，S9/S11
+只做一次最终评估。代码与输出：
+
+- `OpenRUMPL_baseline_audit/build_e2_fused_temporal_cache_20260818.py`
+- `OpenRUMPL_baseline_audit/train_e2_clean_temporal_residual_20260818.py`
+- `OpenRUMPL_baseline_audit/launch_h18_clean_temporal_e2_20260818.sh`
+- `/mnt/data/cjyoutput/gbt_aligned_hrnet_20260818/h18_clean_temporal/`
+
+### 54.3 H18 最终结果（2026-08-18，已完成）
+
+真正的 E2-C2 中心基线和第 0 epoch 结果如下（mm；8 epoch 仍在执行）：
+
+| split | V2 baseline → temporal | V3 baseline → temporal | V4 baseline → temporal |
+|---|---:|---:|---:|
+| S8 holdout，第 0 epoch | 20.402 → **18.465** (-1.937) | 13.702 → **12.726** (-0.976) | 11.739 → **11.045** (-0.694) |
+| S8 holdout，第 1 epoch（最佳） | 20.402 → **18.322** (-2.080) | 13.702 → **12.763** (-0.939) | 11.739 → **11.118** (-0.621) |
+| S9/S11 dense E2-C2 baseline | 38.827 | 29.638 | 27.371 |
+| S9/S11 H18 temporal（epoch 1） | **37.633** (-1.194) | **29.385** (-0.253) | 27.398 (+0.027) |
+
+完整 S9/S11 的 action-equal 平均从 `31.945` 降到 `31.472 mm`（-0.473 mm）。
+收益主要来自 V2，V3 为小幅稳定下降，V4 基本持平并有 `0.027 mm` 的噪声级退化；
+因此 H18 可以作为“正常数据有效、尤其补强两视角”的时序控制，但不能声称三种
+视角全部提升。第 2--7 epoch 在 S8 上继续下降，说明直接长训会跨主体过拟合，
+后续固定使用 S8 选择的早停 checkpoint，不再延长训练。
+
+结论：clean temporal branch 保留，下一步才允许在该 checkpoint 上加入遮挡增强和
+uncertainty gate，并分别报告 clean/occlusion；若遮挡训练破坏上述 clean 结果，则
+保留 H18 作为 clean temporal 消融，不把遮挡收益包装成主模型提升。
+
+### 54.4 训练动力学复核
+
+H18 的第 1 epoch 最优不是数据对齐错误。独立审计确认：训练与验证 pkl 的组键、
+相机完整性、subject/action/frame 顺序均与 cache 一致。日志显示 train loss 从
+`0.00840` 持续降至 `0.00699`，但 S8 holdout 均值在 epoch 1 的 `14.068 mm`
+之后升至 epoch 7 的 `15.237 mm`，且 V4 先从 `-0.621 mm` 变为 `+0.688 mm`。
+这是高学习率和高度重叠窗口下的小残差模型过拟合，不是“训练轮数不够”。
+
+同时，H18 每个 epoch 包含 64,141 个训练窗口、约 1,003 个 optimizer step；8 epoch
+约 8,024 次更新。它冻结了 E2-C2 主干，只训练约百万参数的 residual，不能与 GBT
+从头训练完整网络的 300k iterations 直接类比。
+
+为验证是否可以稳定训练，已启动 H18-lowLR（输出目录
+`/mnt/data/cjyoutput/gbt_aligned_hrnet_20260818/h18_clean_temporal_lowlr/`）：
+学习率 `5e-5`、weight decay `5e-4`、12 epoch，其余协议完全不变。该结果确定前，
+不启动遮挡增强。
+
+### 54.5 H18-lowLR 最终结果（2026-08-18，已完成）
+
+H18-lowLR 使用与 H18 完全相同的输入、窗口、冻结的 E2-C2 主干和 S8 选择协议，
+只将学习率从 `3e-4` 降为 `5e-5`，weight decay 从 `1e-4` 提高为 `5e-4`，并跑
+满 12 个 epoch。S8 的最佳 checkpoint 为第 3 epoch，而不是第 1 epoch；这说明原
+H18 的早停主要受高学习率过拟合影响，而不是训练窗口不足或 cache 错位。
+
+| 方法 | V2 | V3 | V4 | V2/V3/V4 均值 |
+|---|---:|---:|---:|---:|
+| T=9 E2-C2 baseline | 38.827 | 29.638 | 27.371 | 31.945 |
+| H18 高 LR，第 1 epoch | 37.633 | 29.385 | 27.398 | 31.472 |
+| H18-lowLR，第 3 epoch | **37.704** | **29.231** | **27.219** | **31.385** |
+
+在正式 S9/S11 一次性评估中，H18-lowLR 相对同口径 T=9 E2-C2 baseline 的变化为：
+V2 `-1.123 mm`、V3 `-0.407 mm`、V4 `-0.153 mm`，平均 `-0.561 mm`。与高 LR
+版本相比，V2 略低 `0.071 mm`，但 V3/V4 分别再降低 `0.154/0.180 mm`，因此整体
+更均衡。第 3 epoch 后 holdout 均值逐步回升，仍需按 S8 早停，不能把“跑满 epoch”
+当作自动有效。
+
+结论：正常帧上的时序残差分支已经有可重复的小幅收益，且不再只改善 V2；保留
+H18-lowLR 第 3 epoch 作为 clean temporal checkpoint。下一步允许在该 checkpoint
+上做 uncertainty-gated occlusion 训练，但必须同时报告 clean 表，并要求遮挡版在
+clean 数据上的退化不超过预先设定阈值；否则只保留 clean temporal 消融，不把遮挡
+收益包装成主模型收益。完整记录和逐 epoch 指标见
+`/mnt/data/cjyoutput/gbt_aligned_hrnet_20260818/h18_clean_temporal_lowlr/result.json`。
+
+## 55. H19：修正为 GBT 公平协议的 causal seq2seq temporal（2026-08-18，已排队）
+
+### 55.1 H18 不能直接与 GBT 时序结果比较的原因
+
+复核代码后发现，H18 的 T=9 输出是窗口中间帧，因此使用了后 4 帧；GBT 在评估时
+输入当前帧和 8 个历史帧，只输出最新帧。H18 还只监督中心帧，空间层与时序层成组
+堆叠，而 MixSTE/GBT 都训练整段序列输出，MixSTE 明确采用 spatial/temporal 逐层
+交替。因此 H18 只能证明当前数据中存在可利用的时序信息，其数值不能作为正式的
+GBT 公平对比结果。
+
+此外，H18 为 S8 holdout 选择 checkpoint 后直接用 S1/S5/S6/S7 权重测试，没有
+像 GBT/H36M 标准协议那样把 S8 纳入最终训练。H19 改为两阶段：先用
+S1/S5/S6/S7 -> S8 选择 epoch；固定 epoch 后重新初始化，在 S1/S5/S6/S7/S8 上
+重训，S9/S11 只评一次。
+
+### 55.2 root 瓶颈诊断
+
+在严格 latest-frame T=9 窗口上，E2-C2 baseline 为约
+`38.876 / 29.689 / 27.419 mm`。其 root 误差分别约为
+`34.488 / 28.550 / 26.856 mm`。H18 完全禁止修改 root，而 GBT 的 V4 目标是
+`26.0 mm`；因此仅靠 root-protected relative-pose residual 很难跨过 V4 目标。
+H19 将 root translation 与 root-relative pose 分成两个零初始化输出头，并以小幅
+trust region 单独控制 root residual。
+
+### 55.3 H19 结构与消融
+
+共同设置：冻结 E2-C2 单帧前端；T=9；只输出最新帧做正式评估；训练监督 9 个输出
+帧；spatial/temporal block 逐层交替；初始函数严格等于 E2-C2；S8 选轮数后用五个
+标准训练主体正式 refit。
+
+| 实验 | root residual | temporal loss | 目的 |
+|---|---|---|---|
+| H19A | 禁止 | 0 | 隔离公平 causal/seq2seq/alternating 的结构收益 |
+| H19B | 独立小幅 root head | 0 | 检验 absolute root 是否是 V4 天花板 |
+| H19C | 独立小幅 root head | MixSTE-style velocity loss | 检验时序一致性损失的净收益 |
+
+实现与启动器：
+
+- `OpenRUMPL_baseline_audit/train_e2_causal_temporal_seq2seq_20260818.py`
+- `OpenRUMPL_baseline_audit/launch_h19_causal_seq2seq_variant_20260818.sh`
+- `OpenRUMPL_baseline_audit/run_h19_when_gpu_free_20260818.sh`
+
+代码已通过 CPU 前向、训练、评估和 checkpoint 冒烟测试。由于两张 GPU 均被已有
+任务占满，H19A/H19C 已进入 GPU0 安全等待队列，H19B 已进入 GPU1 安全等待队列；
+只在对应卡显存低于 4 GB 时启动，不抢占现有任务。正式门槛仍为 GBT HRNet 的
+`36.8 / 30.4 / 26.0 mm`，未跨过前不转 ResNet。

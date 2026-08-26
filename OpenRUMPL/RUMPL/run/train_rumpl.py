@@ -95,6 +95,12 @@ def parse_args():
     parser.add_argument('--workers', help='num of dataloader workers', type=int)
     parser.add_argument('--train-batch-size', help='training batch size', type=int)
     parser.add_argument('--test-batch-size', help='test batch size', type=int)
+    parser.add_argument(
+        '--train-n-samples', help='limit training samples for a smoke/audit run',
+        type=int)
+    parser.add_argument(
+        '--test-n-samples', help='limit validation samples for a smoke/audit run',
+        type=int)
     parser.add_argument('--apply-noise', help='apply noise during training', type=int)
     parser.add_argument('--noise-level', help='level of noise', type=float)
     parser.add_argument('--apply-noise-missing', help='apply noise during training', type=int)
@@ -161,6 +167,14 @@ def reset_config(config, args):
         config.TRAIN.BATCH_SIZE = args.train_batch_size
     if args.test_batch_size:
         config.TEST.BATCH_SIZE = args.test_batch_size
+    if args.train_n_samples is not None:
+        if args.train_n_samples <= 0:
+            raise ValueError('--train-n-samples must be positive')
+        config.DATASET.TRAIN_N_SAMPLES = args.train_n_samples
+    if args.test_n_samples is not None:
+        if args.test_n_samples <= 0:
+            raise ValueError('--test-n-samples must be positive')
+        config.DATASET.TEST_N_SAMPLES = args.test_n_samples
     if type(args.apply_noise) == int:
         config.DATASET.APPLY_NOISE = bool(args.apply_noise)
     if type(args.noise_level) == float:
@@ -243,6 +257,20 @@ def reset_config(config, args):
                 'RUMPL_LR_STEPS must be a comma-separated list of integer epochs'
             ) from exc
 
+    save_every_n_epochs = os.environ.get(
+        'RUMPL_SAVE_EVERY_N_EPOCHS', '0'
+    ).strip()
+    try:
+        config.SAVE_EVERY_N_EPOCHS = int(save_every_n_epochs or '0')
+    except ValueError as exc:
+        raise ValueError(
+            'RUMPL_SAVE_EVERY_N_EPOCHS must be a non-negative integer'
+        ) from exc
+    if config.SAVE_EVERY_N_EPOCHS < 0:
+        raise ValueError(
+            'RUMPL_SAVE_EVERY_N_EPOCHS must be a non-negative integer'
+        )
+
 
 def apply_train_scope(model, scope):
     """Freeze the established network for targeted residual experiments."""
@@ -323,6 +351,10 @@ def update_config_file(conf, args):
         conf["TRAIN"]["BATCH_SIZE"] = args.train_batch_size
     if args.test_batch_size:
         conf["TEST"]["BATCH_SIZE"] = args.test_batch_size
+    if args.train_n_samples is not None:
+        conf["DATASET"]["TRAIN_N_SAMPLES"] = args.train_n_samples
+    if args.test_n_samples is not None:
+        conf["DATASET"]["TEST_N_SAMPLES"] = args.test_n_samples
     if type(args.apply_noise) == int:
         conf["DATASET"]["APPLY_NOISE"] = bool(args.apply_noise)
     if type(args.noise_level) == float:
@@ -693,6 +725,16 @@ def main():
             'train_time': train_time.sum,
             'test_time': test_time.sum,
         }, best_model, final_output_dir)
+        save_every_n_epochs = getattr(config, 'SAVE_EVERY_N_EPOCHS', 0)
+        if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0:
+            epoch_model_state_file = os.path.join(
+                final_output_dir,
+                'epoch_{:03d}_state.pth.tar'.format(epoch + 1),
+            )
+            logger.info(
+                'saving epoch model state to {}'.format(epoch_model_state_file)
+            )
+            torch.save(model.module.state_dict(), epoch_model_state_file)
         # save the number of epoch passed in a text file
         with open(os.path.join(final_output_dir, 'epoch.txt'), 'w') as f:
             f.write(str(epoch + 1))

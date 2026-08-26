@@ -48,6 +48,10 @@ def parse_args() -> argparse.Namespace:
         "--subset", choices=("train", "validation"), default="train",
         help="H36M split to export; train is the historical default.",
     )
+    parser.add_argument(
+        "--subjects", type=int, nargs="+",
+        help="Optionally retain only these H36M subject IDs.",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
@@ -109,7 +113,10 @@ def main() -> None:
     args = parse_args()
     if not 0 <= args.shard_index < args.num_shards:
         raise ValueError("shard-index must be in [0, num-shards)")
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    # Respect an outer physical-GPU mapping such as CUDA_VISIBLE_DEVICES=1;
+    # ``--gpu 0`` then denotes logical cuda:0 inside that mapping.  Standalone
+    # calls still use --gpu to establish visibility when no mapping exists.
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", args.gpu)
     torch.set_grad_enabled(False)
 
     update_config(args.cfg)
@@ -128,13 +135,24 @@ def main() -> None:
 
     dataset_class = getattr(dataset, config.DATASET.TEST_DATASET)
     pose_dataset = dataset_class(config, args.subset, False, transform=None)
-    total_groups = len(pose_dataset.grouping)
+    original_grouping = pose_dataset.grouping
+    eligible_indices = list(range(len(original_grouping)))
+    if args.subjects:
+        requested_subjects = set(args.subjects)
+        eligible_indices = [
+            index for index, group in enumerate(original_grouping)
+            if int(pose_dataset.db[group[0]]["subject"]) in requested_subjects
+        ]
+        if not eligible_indices:
+            raise ValueError(f"no groups for requested subjects {args.subjects}")
+    total_groups_before_subject_filter = len(original_grouping)
+    total_groups = len(eligible_indices)
     start = total_groups * args.shard_index // args.num_shards
     stop = total_groups * (args.shard_index + 1) // args.num_shards
     if args.max_groups:
         stop = min(stop, start + args.max_groups)
-    original_grouping = pose_dataset.grouping
-    selected_grouping = original_grouping[start:stop]
+    selected_indices = eligible_indices[start:stop]
+    selected_grouping = [original_grouping[index] for index in selected_indices]
     actions = np.asarray(
         [int(pose_dataset.db[group[0]]["action"]) for group in selected_grouping],
         dtype=np.int16,
@@ -199,7 +217,7 @@ def main() -> None:
     temporary = output.with_name(output.name + ".tmp.npz")
     np.savez_compressed(
         temporary,
-        group_indices=np.arange(start, stop, dtype=np.int64),
+        group_indices=np.asarray(selected_indices, dtype=np.int64),
         actions=actions,
         subjects=subjects,
         predictions=predictions,
@@ -211,6 +229,8 @@ def main() -> None:
         "purpose": "H76 GHT-style training hypothesis pool",
         "split": f"H36M {args.subset} split",
         "subjects": sorted(set(subjects.tolist())),
+        "requested_subjects": args.subjects,
+        "total_four_view_groups_before_subject_filter": total_groups_before_subject_filter,
         "total_four_view_groups": total_groups,
         "shard_index": args.shard_index,
         "num_shards": args.num_shards,
@@ -234,6 +254,9 @@ def main() -> None:
                 "RUMPL_TRI_ANCHOR", "RUMPL_TRI_ANCHOR_REG",
                 "RUMPL_TRI_ANCHOR_CONF_EPS", "RUMPL_PFT_REPEAT_LAST",
                 "RUMPL_ANCHOR_CENTERED_RAYS", "RUMPL_INPUT_PLUCKER",
+                "RUMPL_BODY_CANONICAL_FRAME", "RUMPL_BODY_CANONICAL_REG",
+                "RUMPL_BODY_CANONICAL_PELVIS_PRIOR",
+                "RUMPL_BODY_CANONICAL_ROBUST_TORSO",
             )
         },
     }

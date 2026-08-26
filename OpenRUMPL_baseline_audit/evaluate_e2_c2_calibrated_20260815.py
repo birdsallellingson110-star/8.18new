@@ -55,6 +55,10 @@ def main():
         model = SetTransformerJointUtility(
             state["mean"], state["std"], state["attention_depth"],
             stage_heads=state.get("stage_heads", False),
+            canonical_geometry=state.get("canonical_geometry", False),
+            fixed_metric_normalization=state.get(
+                "fixed_metric_normalization", False
+            ),
         ).to(device)
         model.load_state_dict(state["state_dict"], strict=True)
         result = trainer.evaluate(model, loader, device, temperature)

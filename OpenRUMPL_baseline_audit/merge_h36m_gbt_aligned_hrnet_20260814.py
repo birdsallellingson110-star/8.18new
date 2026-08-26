@@ -96,7 +96,9 @@ def _entry_fields(
         metadata = {
             str(key): value
             for key, value in entry.items()
-            if str(key).startswith("mmpose_") or str(key) == "detector_fallback"
+            if str(key).startswith("mmpose_")
+            or str(key).startswith("occlusion_")
+            or str(key) == "detector_fallback"
         }
     elif isinstance(entry, (tuple, list)) and len(entry) >= 3:
         index, points, scores = entry[:3]
@@ -279,7 +281,12 @@ def main() -> None:
         joints, confidence = convert(points, scores, swap_lower_body)
         updated["joints_2d"] = joints
         updated["joints_2d_conf"] = confidence
-        updated["source_2d_protocol"] = "GBT-aligned-HRNet-coordinate-only-v2"
+        is_occluded = "occlusion_masked_joints_rumpl" in metadata
+        updated["source_2d_protocol"] = (
+            "GBT-H36M-Occl-HRNet-coordinate-only-v1"
+            if is_occluded
+            else "GBT-aligned-HRNet-coordinate-only-v2"
+        )
         updated["source_2d_keypoint_model"] = "MMPose-HRNet-W32-COCO"
         updated["source_2d_detector_model"] = "MMDetection-person-detector"
         updated["source_2d_undistorted_full_image"] = not args.keep_camera_distortion

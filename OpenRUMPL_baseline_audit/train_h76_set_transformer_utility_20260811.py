@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,76 @@ from train_h76_hypothesis_utility_20260811 import (
     load_arrays,
     masked_statistics,
 )
+
+
+def canonicalize_candidate_geometry(candidates, rays, task_mask):
+    """GHT-style SE(3)-invariant geometry for candidate scoring.
+
+    The frame uses only active-view rays and detector confidence.  Candidate
+    coordinates are standardized for scoring; the caller still fuses the
+    untouched world-space candidates, so metric output and camera calibration
+    are preserved.
+    """
+    active = task_mask.bool().nonzero(as_tuple=False).flatten()
+    selected = rays[:, :, active]
+    direction = F.normalize(selected[..., :3], dim=-1, eps=1e-7)
+    point = selected[..., 3:6]
+    confidence = selected[..., 6:7].clamp(0, 1) + 0.05
+    eye = torch.eye(3, device=rays.device, dtype=rays.dtype)
+    projection = eye - direction.unsqueeze(-1) * direction.unsqueeze(-2)
+    weighted_projection = confidence.unsqueeze(-1) * projection
+    lhs = weighted_projection.sum(dim=2)
+    rhs = (weighted_projection @ point.unsqueeze(-1)).sum(dim=2)
+    centroid = (
+        (confidence * point).sum(dim=2)
+        / confidence.sum(dim=2).clamp_min(1e-7)
+    )
+    # The scorer must use the same body-frame construction as the frozen
+    # generator.  Earlier E2 runs silently hard-coded reg=1e-4 and disabled
+    # the pelvis prior even when the generator used reg=1e-2 + pelvis prior;
+    # that made the geometry features describe a different coordinate frame.
+    regularization = float(os.environ.get("RUMPL_BODY_CANONICAL_REG", "1e-4"))
+    pelvis_prior = os.environ.get("RUMPL_BODY_CANONICAL_PELVIS_PRIOR", "0") == "1"
+    if pelvis_prior:
+        pelvis_lhs = lhs[:, 0] + regularization * eye
+        pelvis_rhs = rhs[:, 0] + regularization * centroid[:, 0].unsqueeze(-1)
+        pelvis = torch.linalg.solve(pelvis_lhs, pelvis_rhs).squeeze(-1)
+        lhs = lhs + regularization * eye
+        rhs = rhs + regularization * pelvis[:, None, :, None]
+    else:
+        lhs = lhs + regularization * eye
+        rhs = rhs + regularization * centroid.unsqueeze(-1)
+    anchors = torch.linalg.solve(lhs, rhs).squeeze(-1)
+    origin = anchors[:, 0]
+    x_axis = F.normalize(anchors[:, 14] - anchors[:, 11], dim=-1, eps=1e-7)
+    up_hint = anchors[:, 8] - origin
+    y_axis = up_hint - (
+        up_hint * x_axis
+    ).sum(dim=-1, keepdim=True) * x_axis
+    y_axis = F.normalize(y_axis, dim=-1, eps=1e-7)
+    z_axis = F.normalize(
+        torch.cross(x_axis, y_axis, dim=-1), dim=-1, eps=1e-7
+    )
+    y_axis = F.normalize(
+        torch.cross(z_axis, x_axis, dim=-1), dim=-1, eps=1e-7
+    )
+    basis = torch.stack((x_axis, y_axis, z_axis), dim=-1)
+
+    canonical_candidates = torch.einsum(
+        "b...i,bij->b...j",
+        candidates - origin[:, None, None, :],
+        basis,
+    )
+    canonical_rays = rays.clone()
+    canonical_rays[..., :3] = torch.einsum(
+        "b...i,bij->b...j", rays[..., :3], basis
+    )
+    canonical_rays[..., 3:6] = torch.einsum(
+        "b...i,bij->b...j",
+        rays[..., 3:6] - origin[:, None, None, :],
+        basis,
+    )
+    return canonical_candidates, canonical_rays
 
 
 def parse_args():
@@ -78,7 +149,9 @@ class SetTransformerJointUtility(nn.Module):
     def __init__(
         self, mean: torch.Tensor, std: torch.Tensor, attention_depth: int,
         view_cross_attention: bool = False, joint_attention: str = "none",
-        stage_heads: bool = False,
+        stage_heads: bool = False, neutralize_subset_penalty: bool = False,
+        canonical_geometry: bool = False,
+        fixed_metric_normalization: bool = False,
     ):
         super().__init__()
         self.register_buffer("pose_mean", mean)
@@ -86,6 +159,9 @@ class SetTransformerJointUtility(nn.Module):
         self.view_cross_attention = view_cross_attention
         self.joint_attention = joint_attention
         self.stage_heads = stage_heads
+        self.neutralize_subset_penalty = neutralize_subset_penalty
+        self.canonical_geometry = canonical_geometry
+        self.fixed_metric_normalization = fixed_metric_normalization
         self.pose_encoder = nn.Sequential(
             nn.Linear(51, 64), nn.ReLU6(), nn.Linear(64, 64), nn.ReLU6()
         )
@@ -143,7 +219,17 @@ class SetTransformerJointUtility(nn.Module):
 
     def forward(self, candidates, rays, candidate_masks, task_mask):
         batch, count, joints, _ = candidates.shape
-        normalized = (candidates - self.pose_mean) / self.pose_std
+        if self.canonical_geometry:
+            candidates, rays = canonicalize_candidate_geometry(
+                candidates, rays, task_mask
+            )
+        if self.fixed_metric_normalization:
+            # Dataset-independent units: coordinates are metres and the
+            # canonical body extent is O(1 m).  Isotropic scaling avoids
+            # reintroducing H36M axis statistics after standardization.
+            normalized = candidates / 0.5
+        else:
+            normalized = (candidates - self.pose_mean) / self.pose_std
         root_relative = normalized - normalized[:, :, :1]
         context = self.pose_encoder(root_relative.flatten(2))
         context = context[:, :, None].expand(-1, -1, joints, -1)
@@ -188,6 +274,12 @@ class SetTransformerJointUtility(nn.Module):
         view_fraction = (
             candidate_masks.sum(dim=-1)[None, :, None, None] / task_mask.sum()
         ).expand(batch, -1, joints, -1)
+        if self.neutralize_subset_penalty:
+            # Leave-one-out and single-view hypotheses are the oracle winners,
+            # but excluded-residual / view-fraction features punish them.
+            excluded_residual = torch.zeros_like(excluded_residual)
+            excluded_conf = torch.zeros_like(excluded_conf)
+            view_fraction = torch.zeros_like(view_fraction)
         joint = self.joint_embedding[None, None].expand(batch, count, -1, -1)
         features = torch.cat(
             (

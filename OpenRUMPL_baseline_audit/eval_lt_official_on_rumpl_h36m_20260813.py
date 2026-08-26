@@ -32,6 +32,11 @@ from mvn.utils import cfg, multiview, op  # noqa: E402
 from mvn.utils.img import crop_image, normalize_image, resize_image  # noqa: E402
 from mvn.utils.multiview import Camera  # noqa: E402
 
+from h36m_occlusion_protocol_20260822 import (  # noqa: E402
+    apply_white_joint_squares,
+    protocol_manifest as occlusion_protocol_manifest,
+)
+
 
 ACTION_NAMES = {
     2: "Direction", 3: "Discuss", 4: "Eating", 5: "Greet", 6: "Phone",
@@ -100,6 +105,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the backbone and export observations without triangulation metrics.",
     )
+    parser.add_argument(
+        "--occlusion-prob",
+        type=float,
+        default=0.0,
+        help="GBT H36M-Occl per-joint white-square probability (paper: 0.1)",
+    )
+    parser.add_argument(
+        "--occlusion-square-fraction",
+        type=float,
+        default=0.15,
+        help="square side / longer annotation-box side; absent from GBT paper",
+    )
+    parser.add_argument(
+        "--occlusion-seed",
+        type=int,
+        default=20260822,
+        help="deterministic mask seed; absent from GBT paper",
+    )
     return parser.parse_args()
 
 
@@ -131,6 +154,9 @@ class RUMPLH36MImages(Dataset):
     def __init__(
         self, pkl_path: str, image_root: str, limit_groups: int, undistort: bool,
         group_indices_json: str | None = None,
+        occlusion_prob: float = 0.0,
+        occlusion_square_fraction: float = 0.15,
+        occlusion_seed: int = 20260822,
     ) -> None:
         with open(pkl_path, "rb") as handle:
             records = pickle.load(handle)
@@ -153,6 +179,9 @@ class RUMPLH36MImages(Dataset):
             self.groups = self.groups[:limit_groups]
         self.image_root = Path(image_root)
         self.undistort = undistort
+        self.occlusion_prob = float(occlusion_prob)
+        self.occlusion_square_fraction = float(occlusion_square_fraction)
+        self.occlusion_seed = int(occlusion_seed)
 
     def __len__(self) -> int:
         return len(self.groups)
@@ -161,6 +190,7 @@ class RUMPLH36MImages(Dataset):
         cv2.setNumThreads(0)
         key, records = self.groups[index]
         images, projections = [], []
+        occlusion_masks, occlusion_sides = [], []
         camera_rotations, camera_translations = [], []
         camera_intrinsics, camera_distortions = [], []
         for record in records:
@@ -174,6 +204,22 @@ class RUMPLH36MImages(Dataset):
                 image = cv2.undistort(
                     image, intrinsic, distortion_from_record(record), None, intrinsic
                 )
+            if self.occlusion_prob > 0:
+                occlusion = apply_white_joint_squares(
+                    image,
+                    record,
+                    probability=self.occlusion_prob,
+                    square_fraction=self.occlusion_square_fraction,
+                    seed=self.occlusion_seed,
+                )
+                image = occlusion.image
+                mask = np.zeros((17,), dtype=np.uint8)
+                mask[occlusion.masked_joints.astype(np.int64)] = 1
+                occlusion_masks.append(mask)
+                occlusion_sides.append(occlusion.square_side_px)
+            else:
+                occlusion_masks.append(np.zeros((17,), dtype=np.uint8))
+                occlusion_sides.append(0)
 
             # The official label file stores int16 boxes.  Mirror its PIL crop
             # semantics instead of passing fractional coordinates.
@@ -232,6 +278,8 @@ class RUMPLH36MImages(Dataset):
                 [int(round(float(value))) for value in record["box"]]
                 for record in records
             ], dtype=np.float32),
+            "occlusion_mask": np.stack(occlusion_masks).astype(np.uint8),
+            "occlusion_side_px": np.asarray(occlusion_sides, dtype=np.int32),
         }
 
 
@@ -251,6 +299,8 @@ def summarize(errors: np.ndarray, actions: np.ndarray) -> dict:
 
 def main() -> None:
     args = parse_args()
+    if args.occlusion_prob > 0 and not args.undistort:
+        raise ValueError("H36M-Occl requires full-image undistortion before masking")
     torch.set_grad_enabled(False)
     device = torch.device(args.device)
 
@@ -323,6 +373,9 @@ def main() -> None:
     dataset = RUMPLH36MImages(
         args.pkl, args.image_root, args.limit_groups, args.undistort,
         args.group_indices_json,
+        args.occlusion_prob,
+        args.occlusion_square_fraction,
+        args.occlusion_seed,
     )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,
@@ -347,6 +400,8 @@ def main() -> None:
     targets_all = []
     actions_all, confidences_all, pixel_errors_all = [], [], []
     exported_observations: dict[tuple[int, ...], tuple[np.ndarray, np.ndarray]] = {}
+    exported_occlusions: dict[tuple[int, ...], tuple[np.ndarray, int]] = {}
+    occlusion_mask_count = 0
     pixel_pair_sums = np.zeros((17, 17), dtype=np.float64)
     pixel_pair_count = 0
 
@@ -384,6 +439,7 @@ def main() -> None:
         pixel_pair_sums += pair_error.sum(dim=(0, 1)).cpu().numpy()
         pixel_pair_count += batch_size * n_views
         actions_all.append(batch["action"].numpy())
+        occlusion_mask_count += int(batch["occlusion_mask"].sum().item())
         if args.predictions_output:
             targets_all.append(targets.cpu().numpy())
 
@@ -402,6 +458,10 @@ def main() -> None:
                     exported_observations[record_key] = (
                         original.astype(np.float32),
                         rumpl_conf[row, view, :, None].astype(np.float32),
+                    )
+                    exported_occlusions[record_key] = (
+                        batch["occlusion_mask"][row, view].numpy().astype(np.uint8),
+                        int(batch["occlusion_side_px"][row, view].item()),
                     )
 
         if not args.export_only:
@@ -446,6 +506,16 @@ def main() -> None:
             "group_indices_json": args.group_indices_json,
             "joint_mapping_pred_lt_to_target_lt": PRED_LT_TO_TARGET_LT.tolist(),
             "joint_mapping_rumpl_from_pred_lt": RUMPL_FROM_PRED_LT.tolist(),
+            "occlusion": (
+                None
+                if args.occlusion_prob <= 0
+                else occlusion_protocol_manifest(
+                    args.occlusion_prob,
+                    args.occlusion_square_fraction,
+                    args.occlusion_seed,
+                )
+            ),
+            "occlusion_mask_count": int(occlusion_mask_count),
         },
         "results": {},
         "confidence": {},
@@ -519,7 +589,22 @@ def main() -> None:
                 continue
             updated = copy.deepcopy(record)
             updated["joints_2d"], updated["joints_2d_conf"] = exported_observations[key]
-            updated["joints_2d_source"] = "official_lt_alg_undistorted_annotation_box"
+            updated["joints_2d_source"] = (
+                "official_lt_alg_h36m_occl_undistorted_annotation_box"
+                if args.occlusion_prob > 0
+                else "official_lt_alg_undistorted_annotation_box"
+            )
+            if args.occlusion_prob > 0:
+                mask, side = exported_occlusions[key]
+                updated["h36m_occl_masked_joint_indices"] = np.flatnonzero(mask).astype(
+                    np.int16
+                )
+                updated["h36m_occl_square_side_px"] = int(side)
+                updated["h36m_occl_protocol"] = occlusion_protocol_manifest(
+                    args.occlusion_prob,
+                    args.occlusion_square_fraction,
+                    args.occlusion_seed,
+                )
             updated_records.append(updated)
         if len(updated_records) != len(exported_observations):
             raise RuntimeError(

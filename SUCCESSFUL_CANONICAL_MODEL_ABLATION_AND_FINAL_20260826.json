@@ -1,0 +1,116 @@
+{
+  "record_scope": "project-only successful model process, ablations, and frozen final results; no external-paper comparison",
+  "frozen_date": "2026-08-26",
+  "metric": "action-equal All-17 absolute MPJPE mm; lower is better",
+  "successful_model_chains": {
+    "resnet152": {
+      "chain": ["canonical_global_joint_query_rumpl", "canonical_22c_e2", "uncertainty_seq025_h18"],
+      "generator": {
+        "coordinate_frame": "body-canonical ray frame",
+        "body_canonical_reg": 0.0001,
+        "pelvis_prior": false,
+        "global_joint_query": {"enabled": true, "depth": 2, "max_delta": 0.5}
+      },
+      "e2": {"generator_candidates": 11, "confidence_triangulation_candidates": 11},
+      "h18": {"uncertainty_gate_dim": 7, "stage_balanced_loss": true, "sequence_loss_weight": 0.25}
+    },
+    "hrnet_w32": {
+      "chain": ["canonical_rumpl_token10", "canonical_22c_e2", "continuous_nowarp_h18"],
+      "generator": {
+        "coordinate_frame": "body-canonical ray frame",
+        "body_canonical_reg": 0.01,
+        "pelvis_prior": true,
+        "global_joint_query": {"enabled": false},
+        "token_dropout_train": 0.1,
+        "token_dropout_test": 0.0
+      },
+      "e2": {"generator_candidates": 11, "confidence_triangulation_candidates": 11},
+      "h18": {"camera_independent": true, "continuous_time": true, "centered_window": 9, "stride": 5}
+    },
+    "shared": {
+      "e2_temperature": {"V2": 0.4, "V3": 1.8, "V4": 1.8},
+      "checkpoint_selection": "clean S8 holdout only; S9/S11 and occlusion sets excluded"
+    }
+  },
+  "clean_cumulative_ablation": {
+    "resnet152": {
+      "canonical_global_joint_query_generator": [30.616666, 23.712266, 22.433580],
+      "plus_canonical_e2_two_seed_mean": [30.643481, 21.528242, 19.566099],
+      "plus_selected_h18_final": [29.415861, 21.020283, 19.280602]
+    },
+    "hrnet_w32": {
+      "canonical_token10_generator": [38.412123, 31.376000, 28.900000],
+      "plus_canonical_e2_two_seed_mean": [38.422817, 29.775886, 27.707565],
+      "plus_selected_h18_final": [37.391869, 29.501251, 27.713139]
+    },
+    "column_order": ["V2", "V3", "V4"]
+  },
+  "selected_h18": {
+    "resnet152": {
+      "variant": "uncertainty_seq025",
+      "s8_holdout_mean_mm": 9.995936,
+      "best_epoch": 2,
+      "checkpoint": "/mnt/data/cjyoutput/camera_generalization_20260824/stage1_h36m_dual_frontend/resnet152/canonical_h18/model_uncertainty_seq025/model_best.pth.tar",
+      "checkpoint_sha256": "b7aaa26ffbef24c9d965e441aa6ac3eaebef471f777c2235090cef6bbdddfaf9"
+    },
+    "hrnet_w32": {
+      "variant": "continuous_nowarp",
+      "s8_holdout_mean_mm": 14.392898,
+      "best_epoch": 1,
+      "checkpoint": "/mnt/data/cjyoutput/camera_generalization_20260824/hrnet_token10_generalization_20260825/canonical_h18/model_continuous_nowarp/model_best.pth.tar",
+      "checkpoint_sha256": "d0796f9820cb272590878db245e2c9e817f28df1e992045eaff1a4a39a0e3b1b"
+    },
+    "resnet152_candidate_ablation": {
+      "canonical_h18": {"s8_holdout_mean_mm": 10.0016, "best_epoch": 9, "final_v2_v3_v4": [29.533, 21.044, 19.315]},
+      "uncertainty_stagebalanced": {"s8_holdout_mean_mm": 9.9988, "best_epoch": 3, "final_v2_v3_v4": [29.336, 20.996, 19.268]},
+      "uncertainty_seq025": {"s8_holdout_mean_mm": 9.9959, "best_epoch": 2, "final_v2_v3_v4": [29.416, 21.020, 19.281]}
+    },
+    "hrnet_w32_excluded_extensions": "uncertainty extensions did not improve the clean S8 selection metric; robust-torso failed the complete V2/V3/V4 criterion"
+  },
+  "voc_occ23_matched_t1": {
+    "resnet152": {
+      "occ2": [49.739063, 27.886143, 22.672424],
+      "occ3": [56.699139, 30.897457, 24.607059]
+    },
+    "hrnet_w32": {
+      "occ2": [57.996151, 34.087570, 29.667017],
+      "occ3": [63.892677, 36.498146, 31.153387]
+    }
+  },
+  "voc_occ23_final_t9": {
+    "resnet152": {
+      "occ2": [45.278240, 25.651548, 21.349012],
+      "occ3": [51.111366, 27.862152, 22.652637]
+    },
+    "hrnet_w32": {
+      "occ2": [53.966225, 32.203568, 28.704933],
+      "occ3": [58.851540, 33.970482, 29.695425]
+    },
+    "column_order": ["V2", "V3", "V4"]
+  },
+  "old_complete_t9_replayed_same_voc_input": {
+    "resnet152": {
+      "occ2": [48.092384, 27.528727, 22.122774],
+      "occ3": [54.350719, 30.527384, 23.733904]
+    },
+    "hrnet_w32": {
+      "occ2": [52.561218, 32.478725, 28.269506],
+      "occ3": [56.937489, 33.820290, 29.341320]
+    }
+  },
+  "stage2_protocol": {
+    "dense_temporal_center_groups": 26269,
+    "scored_center_groups": 2021,
+    "occluded_source_views": {"occ2": 2, "occ3": 3},
+    "voc_objects_per_selected_view": 2,
+    "scale_range": [0.2, 0.5],
+    "seed": 42,
+    "training_data": "clean H36M only"
+  },
+  "frozen_limit": "Current ResNet improves all six Occ-2/Occ-3 columns over the replayed old complete model. Current HRNet improves only Occ-2 V3 and regresses in the other five columns.",
+  "result_sources": {
+    "clean_selection": "/mnt/data/cjyoutput/camera_generalization_20260824/final_temporal_selection_20260825.json",
+    "voc_final_table": "/mnt/data/cjyoutput/h36m_occ_voc_dense_20260824/final_occ23_table.json",
+    "old_vs_current_replay": "/home/lixiaob/cjy/OpenRUMPL_baseline_audit/VOC_OCC23_OLD_VS_CANONICAL_T9_20260826.md"
+  }
+}

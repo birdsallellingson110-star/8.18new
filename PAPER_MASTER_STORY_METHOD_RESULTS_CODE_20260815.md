@@ -1,12 +1,534 @@
-# 论文初稿生成母文档：几何锚定的跨视角射线精化与反事实候选效用
+# 论文初稿生成母文档：全局关节查询与多假设效用融合
 
-> 版本：2026-08-15（实验进行中）  
+> 版本：2026-08-22（第一阶段 H36M clean 结果冻结版）
 > 用途：将本文件整体交给网页版 Codex，生成中文或英文论文初稿。  
 > 重要规则：本文件把“已完成的事实”“历史探索结果”“正在运行”“计划/目标”严格分开。写论文时不得把 oracle、计划值、不同输入协议或正在运行的实验写成正式主结果；不得虚构缺失数值。
 
 ---
 
-## 0. 给网页版 Codex 的直接指令
+## 最高优先级路线覆盖声明（2026-08-22）
+
+本节及其后紧接的“当前冻结技术方案”和“GBT 对齐实验总表”是本文档的
+**最高优先级事实源**。若后面的 2026-08-15 历史稿与本节冲突，必须以本节
+为准。历史稿中的 RIGR/A1D 图像特征、HRNet patch correspondence、可训练
+view bias、蒸馏、FSQ/codebook、旧双流时序等均属于探索记录，**不是当前模型
+baseline 的组成部分**，不得在摘要、方法图或主结果中写成已经采用的方法。
+
+当前路线冻结为三个逐级版本：
+
+- `GQ-RUMPL`：RUMPL/H76 射线主干 + 全局 Joint-Query residual，单帧；
+- `GQ-RUMPL-E2`：在同一生成器上增加 E2-C2 多假设效用软融合，单帧；
+- `GQ-RUMPL-E2-T`：在冻结空间模型后增加 H18，9 帧中心窗口。
+
+这三个名称是实验记录名，不是最终论文标题。最终题目和“核心创新模块”必须等
+H36M clean、H36M-Occl 和消融表完成后再决定，不能提前把尚未证实的模块写成
+主要贡献。
+
+以上三段链是当前 **ResNet 主方法线**。HRNet 上的 Global Joint-Query 迁移没有
+稳定改善，因此 HRNet 第一阶段冻结为 `C2 -> E2-C2 -> H18`，作为相同坐标输入
+层级下的 detector-specific 对照；不得把 HRNet 行误标成 `GQ-RUMPL`。
+
+### 给网页版 Codex 的当前写作指令
+
+1. 当前总目标是严格沿用 GBT 的实验组织方式：H36M 双输入 clean baseline、
+   H36M-Occl、Occlusion-Person、CMU、CMU→H36M、组件消融和时序长度。
+2. 第一阶段 H36M clean 已完成并冻结；第二阶段 H36M-Occl 尚未产出结果，后续
+   阶段不得被写成已完成。第一阶段独立事实源为
+   `STAGE1_H36M_CLEAN_RESULTS_FOR_PAPER_20260822.md`。
+3. 3D 网络始终只接收 2D 坐标、置信度和相机标定射线，不接收 RGB、heatmap、
+   bbox、HRNet/ResNet 中间特征；两条线只有冻结 2D 前端不同。
+4. HRNet 与 ResNet 使用相同输入层级、训练/测试 subjects、指标和相机组合口径；
+   允许针对冻结二维前端选择不同训练超参数。Global Joint-Query 在 ResNet 上有效，
+   但 HRNet 迁移实验未形成统一提升，因此最终 HRNet 行保留 C2+E2+H18，不能虚构
+   成两条前端具有完全相同的最终模块链。
+5. 所有 `TBD` 都必须保留，不能由语言模型补齐；GBT 数字只能标成
+   `GBT-reported`，不能冒充我们的结果或严格复现结果。
+6. 单帧 `T=1` 与时序 `T=9` 必须分行。当前 H18 是中心窗口、非因果模块，不能
+   写成 GBT 的 causal latest-frame 实现；T=2/T=6 需另写因果版本后才能填表。
+7. 不使用 S9/S11 调温度、选 checkpoint 或挑 seed。主指标为 absolute All-17
+   MPJPE，无 root alignment 或 Procrustes alignment，并平均全部相机组合。
+8. “identity-hinge”不是让 V4 降至约 20 mm 的主要原因；主要收益来自 E2-C2
+   候选池与软效用融合，hinge 只用于抑制相对 base 的小幅退化。
+
+---
+
+## A. 当前冻结技术方案
+
+### A.1 研究目标与输入协议
+
+给定同步多视角帧，冻结二维前端为每个时间 (t)、视角 (v)、关节 (j)
+输出像素坐标与置信度：
+
+\[
+\mathbf x_{tvj}=(u,v,1)^\top,\qquad c_{tvj}\in[0,1].
+\]
+
+相机标定为 \((\mathbf K_v,\mathbf R_v,\mathbf t_v)\)，相机中心和世界坐标
+单位射线为：
+
+\[
+\mathbf o_v=-\mathbf R_v^\top\mathbf t_v,
+\qquad
+\mathbf d_{tvj}=\operatorname{normalize}
+(\mathbf R_v^\top\mathbf K_v^{-1}\mathbf x_{tvj}).
+\]
+
+模型输出无对齐的绝对世界坐标 3D pose。当前正式对比包含两条坐标输入：
+
+- `HRNet`：HRNet-W32 COCO 关键点与 YOLOX-X person box；
+- `ResNet-152†`：Learnable Triangulation 官方 H36M-finetuned ResNet-152
+  关键点与置信度。
+
+二者的 3D 网络不读取图像或热图。因此这仍是坐标级方法，前端替换不会把我们
+变成 heatmap/volumetric 方法；但论文表中必须明确 detector，不能隐藏输入差异。
+
+### A.2 置信度三角化锚点与中心化 Plücker 射线
+
+每条射线的法平面投影矩阵为
+
+\[
+\mathbf P_{vj}=\mathbf I-\mathbf d_{vj}\mathbf d_{vj}^{\top},
+\qquad w_{vj}=c_{vj}+\epsilon.
+\]
+
+以加权射线最小二乘得到关节锚点：
+
+\[
+\mathbf A_j=\sum_vw_{vj}\mathbf P_{vj}+\lambda\mathbf I,
+\quad
+\mathbf b_j=\sum_vw_{vj}\mathbf P_{vj}\mathbf o_v,
+\quad
+\mathbf a_j=\operatorname{solve}(\mathbf A_j,\mathbf b_j),
+\]
+
+其中 \(\epsilon=0.05\)、\(\lambda=10^{-4}\)。以 root 锚点平移相机原点
+\(\mathbf o'_v=\mathbf o_v-\mathbf a_{root}\)，中心化 Plücker moment 为
+
+\[
+\mathbf m_{vj}=\mathbf o'_v\times\mathbf d_{vj}.
+\]
+
+共享 ray encoder 编码方向、moment 与置信度，不使用 camera-ID lookup 或固定
+camera-slot embedding，因而保留 RUMPL 的相机布局泛化性。
+
+### A.3 保留的 RUMPL/H76 主干
+
+RUMPL 先用 VFT 对每个关节跨视角融合，再用 PFT 建模 17 个关节：
+
+\[
+\mathbf h_j=\operatorname{VFT}(\{\mathbf z_{vj}\}_{v\in\mathcal V}),
+\quad
+\mathbf H=\operatorname{PFT}([\mathbf h_1,\ldots,\mathbf h_{17}]),
+\quad
+\hat{\mathbf p}^{base}_j=\mathbf a_j+f_{3D}(\mathbf H_j).
+\]
+
+这一分支保留 RUMPL 最重要的相机无关射线表示、视角共享权重和可变相机数量
+能力。其瓶颈是 VFT 会过早把每个关节的多视角 token 压成一个 token，使腕、踝
+等困难关节无法在压缩前利用完整人体与全部视角证据。
+
+### A.4 全局 Joint-Query residual
+
+在 VFT 之前保留全部 `joint × view` token 作为 memory：
+
+\[
+\mathcal M=\{\mathbf z_{vj}+\mathbf e_j^{mem}\mid
+j=1\ldots17,\ v\in\mathcal V\}.
+\]
+
+每个 learned joint query 由其三角化锚点条件化：
+
+\[
+\mathbf q_j=\mathbf q_j^{learn}+\mathbf W_a\mathbf a_j,
+\qquad
+\tilde{\mathbf q}_{1:17}=\operatorname{Decoder}
+(\mathbf q_{1:17},\mathcal M).
+\]
+
+两层 Transformer decoder 允许每个关节同时访问所有关节、所有视角，然后只
+预测一个有界残差：
+
+\[
+\Delta\mathbf p_j=0.5\tanh
+(\mathbf W_o\operatorname{LN}(\tilde{\mathbf q}_j)),
+\qquad
+\hat{\mathbf p}^{GQ}_j=\hat{\mathbf p}^{base}_j+\Delta\mathbf p_j.
+\]
+
+输出层 \(\mathbf W_o\) 零初始化，使新增支路在训练第 0 步是严格 identity。
+与已失败的“冻结主干后接 query adapter”不同，这里 Joint-Query 和完整 RUMPL
+主干联合训练。该支路修复的是 RUMPL 的早期逐关节视角压缩，而不是改变输入。
+
+### A.5 生成器训练协议
+
+- H36M 训练：S1/S5/S6/S7/S8；测试：S9/S11；
+- seed 0，20 epochs，学习率 `1e-4`；
+- epoch 0--7：均匀随机采样 K=2 相机组合；
+- epoch 8--19：V2:V3:V4 任务比例 `3:1:1`；
+- 同一个 checkpoint 评估 6 个 V2、4 个 V3 和 1 个 V4 组合；
+- clean baseline 不使用遮挡增强；损失直接监督 absolute 3D coordinate。
+
+前 8 轮强化两射线人体先验，随后回放多视角基数，避免历史上 K2-only 训练造成
+V3/V4 崩溃。当前协议不是 300k iteration 的 GBT 严格复现，而是对我们主干经
+审计后冻结的 matched protocol。
+
+### A.6 E2-C2 多假设效用软融合
+
+H36M 四相机共有 11 个合法子集：6 个 V2、4 个 V3、1 个 V4。每个子集生成两
+类候选：
+
+1. 冻结 `GQ-RUMPL` 的学习型 3D 预测；
+2. 相同观测上的 confidence-weighted robust triangulation/IRLS 候选。
+
+总计 22 个候选；测试某个可用相机集合时，包含不可用相机的候选被 mask。评分器
+不使用相机编号，并在 V2/V3/V4 之间共享。
+
+候选特征包括：绝对/根相对 pose、与候选共识的距离、点到射线距离、包含与排除
+视角的残差和置信度统计、subset fraction、加权射线法矩阵特征值谱、全身上下文
+和 joint identity。两层 Set Transformer 输出每个候选、每个关节的相对风险
+\(r_{cj}\)，按视角数设温度进行软融合：
+
+\[
+\alpha_{cj}=\frac{\exp(-r_{cj}/\tau_K)}
+{\sum_{c'}\exp(-r_{c'j}/\tau_K)},
+\qquad
+\hat{\mathbf p}^{E2}_j=\sum_c\alpha_{cj}\hat{\mathbf p}_{cj},
+\]
+
+其中 \(\tau_2=0.4\)，\(\tau_3=\tau_4=1.8\)。温度只能由训练 holdout 选择。
+训练为 10 个 direct-risk epochs（`5e-4`）加 5 个 expected-risk epochs
+（`1e-4`）。最终评分器增加 identity safeguard：
+
+\[
+L_{id}=0.25\sum_K\gamma_K
+\max(0,E_{soft}^{K}-E_{base}^{K}),
+\qquad \gamma_2=4,\quad\gamma_3=\gamma_4=1.
+\]
+
+这一项只避免融合器在 base 已正确时产生小幅伤害；它不是 E2 主要提升来源，也
+不能被包装成单独核心创新。
+
+### A.7 H18 时序残差
+
+H18 放在冻结的 E2-C2 输出之后。每关节输入 12 维信号：
+
+\[
+[\mathbf p_t-\mathbf p_{t,root},\ \mathbf p_{t,root},\
+\mathbf p_t-\mathbf p_{t-1},\
+(\mathbf p_t-\mathbf p_{t-1})-(\mathbf p_{t-1}-\mathbf p_{t-2})].
+\]
+
+先做每帧两层 spatial Transformer，再做每关节两层 temporal Transformer，
+预测中心帧有界残差：
+
+\[
+\Delta\mathbf p^{temp}=0.1\tanh(f_{ST}(\mathbf p_{t-4:t+4})),
+\qquad
+\hat{\mathbf p}^{T}_t=\hat{\mathbf p}^{E2}_t+\Delta\mathbf p^{temp}.
+\]
+
+输出层零初始化，root correction 强制为 0。冻结配置为 T=9、stride=5、
+hidden=96、2 个 spatial + 2 个 temporal layers、12 epochs、`lr=5e-5`、
+`weight_decay=5e-4`。它用于稳定正常序列并为后续遮挡实验提供历史信息；若 clean
+结果退化则不能作为最终 baseline。当前实现是 centered/non-causal，必须如实写。
+
+### A.8 当前已核实结果与状态
+
+第一阶段完整结果另见
+`/home/lixiaob/cjy/STAGE1_H36M_CLEAN_RESULTS_FOR_PAPER_20260822.md`。本节只保留
+论文主线所需的冻结结果。
+
+ResNet-152 坐标输入下，逐级结果为：
+
+| 方法 | T | V2 | V3 | V4 |
+|---|---:|---:|---:|---:|
+| ResNet H76 direct reference | 1 | 41.4704 | 26.0806 | 24.1573 |
+| ResNet `GQ-RUMPL` | 1 | 32.3121 | 25.1006 | 23.5364 |
+| `GQ-RUMPL-E2` identity-preserving | 1 | 32.3193 | 22.5576 | 20.2718 |
+| `GQ-RUMPL-E2-T` | 9 | **31.2151** | **22.0084** | **19.9710** |
+
+Global Joint-Query 相对 H76 在 V2/V3/V4 改善 `9.158/0.980/0.621 mm`。E2 的
+主要收益位于 V3/V4；H18 在相同 dense center 子集上相对 T=1 基线
+`32.437/22.581/20.306` 改善 `1.222/0.572/0.335 mm`。
+
+在相同 22-candidate cache 上，**不含 identity-hinge 的标准 E2-C2** 已完成两个
+seed，S9/S11 严格 action-equal All-17 结果为：
+
+| 中间消融 | V2 | V3 | V4 |
+|---|---:|---:|---:|
+| E2-C2 standard, seed 0 | 32.3312 | 22.6603 | 20.3791 |
+| E2-C2 standard, seed 1 | 32.3305 | 22.6308 | 20.3429 |
+| E2-C2 standard, two-seed mean | **32.3309** | **22.6456** | **20.3610** |
+
+它相对直接 `GQ-RUMPL` 为 `+0.019/-2.455/-3.175 mm`：V3/V4 明显改善，但
+V2 微退化 0.019 mm。加入 identity safeguard 后，两 seed 均值为
+`32.319/22.558/20.272 mm`，相对 standard 再改善 `0.012/0.088/0.089 mm`。
+因此 identity hinge 是稳定器，不是 V3/V4 大幅提升的主要来源。
+
+HRNet 最终保留历史强 C2/E2/H18 链，而不是失败的 Joint-Query 迁移版本：
+
+| 方法 | T | V2 | V3 | V4 |
+|---|---:|---:|---:|---:|
+| HRNet C2 generator | 1 | 38.686 | 30.943 | 28.629 |
+| HRNet C2 + E2-C2 | 1 | 38.700 | 29.486 | 27.274 |
+| HRNet C2 + E2-C2 + H18 | 9 | **37.704** | **29.231** | **27.219** |
+
+HRNet Query 审计的最好折中 U2 为 `38.487/30.913/28.676 mm`，但 V4 相对 C2
+退化 0.047 mm；C2-direct A/B 和 highLR A/B 也均未同时改善三列。因此不能声称
+Global Joint-Query 对 HRNet 有效，完整负结果表放在第一阶段独立事实源中。
+
+上述已完成结果的审计文件与当前流水线输出位置：
+
+- ResNet matched 根目录：
+  `/mnt/data/cjyoutput/gbt_aligned_resnet_20260822/v2_repair/B_global_query_full/`
+- ResNet direct V2/V3/V4：上述目录下 `eval/V2|V3|V4/table2.json`
+- 标准 E2-C2 两 seed 汇总：
+  `e2_c2/scorer/calibrated_v2t04.json`
+- identity-hinge：上述目录下 `e2_c2_identity_hinge/calibrated_v2t04.json`
+- 修正后的 ResNet H18：上述目录下
+  `h18_identity_hinge_v2_gtinput/result.json`
+- matched HRNet 根目录：
+  `/mnt/data/cjyoutput/joint_query_matched_frontends_20260822/hrnet/`
+- 冻结 HRNet H18：
+  `/mnt/data/cjyoutput/gbt_aligned_hrnet_20260818/h18_clean_temporal_lowlr/result.json`
+- ResNet/HRNet 自动启动脚本：
+  `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/launch_resnet_query_best_e2_h18_20260822.sh`、
+  `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/launch_hrnet_query_matched_pipeline_20260822.sh`
+
+关键实现与记录：
+
+- 主干、anchor、Plücker、Joint-Query：
+  `/home/lixiaob/cjy/OpenRUMPL/RUMPL/lib/models/multiview_rumpl.py`
+- E2-C2 candidate wrapper：
+  `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/train_current_e2_confidence_20260815.py`
+- E2 loss/evaluation：
+  `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/train_e2_v234_universal_20260812.py`
+- Set Transformer features：
+  `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/train_h76_set_transformer_utility_20260811.py`
+- H18：
+  `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/train_e2_clean_temporal_residual_20260818.py`
+- 完整技术方案：
+  `/home/lixiaob/cjy/OpenRUMPL_baseline_audit/JOINT_QUERY_MATCHED_FRONTENDS_PLAN_20260822.md`
+
+### A.9 当前论文故事线与暂定贡献
+
+当前证据支持的故事不是“堆叠三个模型”，而是一条围绕 RUMPL 信息瓶颈的递进式
+修复链：
+
+1. **问题定位**：RUMPL 的相机无关 world-ray 表示值得保留，但逐关节 VFT 在
+   看见全身前就压缩所有 view token；真实 H36M 训练下，这会放大困难两相机组合
+   的深度歧义。
+2. **生成器修复**：Global Joint-Query 在 VFT 前保留完整 `joint × view` memory，
+   让每个关节利用人体结构与所有视角证据，同时以零初始化残差保护原 RUMPL 解。
+   现有 ResNet 结果已证明该修复可同时改善 V2/V3/V4，而不是用牺牲某个视角数换取
+   另一列提升。
+3. **集合推理修复**：不同相机子集与稳健几何求解器产生互补假设。E2-C2 不按
+   固定 camera ID 选择，而是按候选与射线的一致性、人体共识和几何条件逐关节软
+   融合；当前结果已证明 V3/V4 有 2--3 mm 级增益。
+4. **时序鲁棒性**：H18 只对最终空间结果做 identity-initialized 小残差，不改变
+   单帧几何主线。只有在 clean 不退化且 occlusion 明显获益时，才可列为正文贡献；
+   否则降为遮挡增强或补充实验。
+5. **泛化证据**：无 camera-ID、可变候选 mask、全组合训练/评估与 CMU→H36M
+   零样本共同证明方法不是记忆 H36M 四个固定机位。
+
+在完整实验完成前，建议暂定三项贡献为：
+
+- 一种保留 RUMPL camera-generalizable rays、但绕过早期逐关节视角压缩的全局
+  joint-query residual；
+- 一种统一 V2/V3/V4 的、逐关节多假设效用软融合机制，并以 identity safeguard
+  限制负融合；
+- 一套在两种坐标前端、clean/occlusion、跨数据集和可变相机数下严格 matched 的
+  评估与诊断。
+
+不得声称“首次使用 Transformer、三角化、Plücker、Set Transformer、时序或
+多假设评分”。最终创新表述要落在这些公开组件如何针对 **RUMPL 的早期信息压缩与
+负候选融合**形成统一、可审计的结构修复上。
+
+---
+
+## B. GBT 对齐实验总路线与结果表模板
+
+### B.1 七阶段路线
+
+| 阶段 | 数据集/协议 | 必须产出的结果 | 当前状态 |
+|---|---|---|---|
+| 1 | H36M clean，HRNet/ResNet，全部 V2/V3/V4 组合 | 冻结空间与时序 baseline | **已完成并冻结** |
+| 2 | H36M-Occl；只用 clean H36M 训练模型 | 两种输入的遮挡主表 | **协议已准备，待运行** |
+| 3 | Occlusion-Person，2/3/4/8 cameras | 与 RANSAC/ScoreFuse/AdaFuse 对比 | 待数据审计 |
+| 4 | CMU Panoptic in-domain | H36M/CMU 主表及 2/4/5/6/8 扩展 | 待开始 |
+| 5 | CMU 训练、H36M 零样本测试 | matched joints 分动作表 | 待开始 |
+| 6 | clean/occlusion/cross-dataset 组件消融 | GBT Table VI 风格累加消融 | 随各阶段同步生成 |
+| 7 | T=1/2/3/6/9 | H36M 与 H36M-Occl 时序长度表 | 待写 causal/even-T 版本 |
+
+### B.2 冻结评估协议
+
+- H36M：S1/S5/S6/S7/S8 train，S9/S11 test；
+- 按 GBT/Learnable Triangulation 口径排除 S9 的 Greeting、SittingDown、
+  Waiting 错误片段；
+- absolute All-17 MPJPE，单位 mm，无 root/PA alignment；
+- action-equal 作为主报告，frame-weighted 结果保留供审计；
+- V2 平均全部 6 组合，V3 平均全部 4 组合，V4 为全部 4 相机；
+- clean 与 occlusion 必须使用同一 clean-trained checkpoint；
+- 同一输入下 T=1 与 T=9 分行；不同 detector 不合并或择优拼接。
+
+以下 `GBT-reported` 数据直接转录自
+`/home/lixiaob/cjy/reference/Geometry-Biased Transformer(1).pdf`，只用作
+表格结构与参考目标。我们的方法行必须从对应评估 JSON 自动填入。
+
+### Table I. H36M clean，较少相机，absolute MPJPE (mm)
+
+| Method | 2D input | T | 2 cams | 3 cams | 4 cams |
+|---|---|---:|---:|---:|---:|
+| Algebraic Triangulation [10], GBT-reported | ResNet-152† | 1 | 51.1 | 23.4 | 19.1 |
+| GBT, reported | ResNet-152† | 9 | 29.9 | 24.4 | 22.7 |
+| `GQ-RUMPL` (verified direct) | ResNet-152† | 1 | **32.312** | **25.101** | **23.536** |
+| `+E2-C2 standard` (intermediate ablation) | ResNet-152† | 1 | 32.331 | 22.646 | 20.361 |
+| `GQ-RUMPL-E2` (identity-preserving final) | ResNet-152† | 1 | **32.319** | **22.558** | **20.272** |
+| `GQ-RUMPL-E2-T` | ResNet-152† | 9 | **31.215** | **22.008** | **19.971** |
+| Algebraic Triangulation, GBT-reported | HRNet | 1 | 120.7 | 50.9 | 44.2 |
+| GBT, reported | HRNet | 9 | 36.8 | 30.4 | 26.0 |
+| HRNet C2 generator | HRNet | 1 | 38.686 | 30.943 | 28.629 |
+| HRNet C2 + E2-C2 | HRNet | 1 | 38.700 | 29.486 | 27.274 |
+| HRNet C2 + E2-C2 + H18 | HRNet | 9 | **37.704** | **29.231** | **27.219** |
+
+### Table II. H36M-Occl，absolute MPJPE (mm)
+
+| Method | 2D input | T | 2 cams | 3 cams | 4 cams |
+|---|---|---:|---:|---:|---:|
+| Algebraic Triangulation [10], GBT-reported | ResNet-152† | 1 | 163.3 | 39.5 | 27.9 |
+| GBT, reported | ResNet-152† | 9 | 39.1 | 33.4 | 31.3 |
+| `GQ-RUMPL` | ResNet-152† | 1 | 47.750 | 33.503 | 31.259 |
+| `GQ-RUMPL-E2` | ResNet-152† | 1 | **47.866** | **29.236** | **24.511** |
+| `GQ-RUMPL-E2-T` (centered H18, internal) | ResNet-152† | 9 | **43.416** | **26.991** | **22.985** |
+| Algebraic Triangulation, GBT-reported | HRNet | 1 | 217.3 | 72.4 | 54.1 |
+| GBT, reported | HRNet | 9 | 42.3 | 34.5 | 31.6 |
+| HRNet C2 generator | HRNet | 1 | 47.213 | 36.095 | 32.668 |
+| HRNet C2 + E2-C2 | HRNet | 1 | **47.252** | **33.509** | **29.739** |
+| HRNet C2 + E2-C2 + H18 (centered, internal) | HRNet | 9 | **43.996** | **31.944** | **28.794** |
+
+Our rows use a **GBT-described, algebraically calibrated reconstruction**
+(`p=0.1`, white square side `0.15` of the longer annotation-box side, seed
+`20260822`).  GBT did not release the H36M-Occl generator, square size, or seed,
+so the numerical comparison is protocol-aligned but must not be called an exact
+official-payload reproduction.  This qualifier is about the missing
+implementation parameters (including the unspecified mask insertion point),
+not about the novelty of synthetic H36M occlusion:
+Sárándi's public code uses Pascal-VOC/shaped occluders, Banik et al. mask joints
+over selected frame spans, and Bragagnolo et al. release a different
+Human3.6M-Occluded generator with two random VOC objects in three of four views.
+Those are related but non-equivalent benchmarks and their numbers should not be
+merged into GBT Table II.  All T=1 rows use frozen clean checkpoints and no
+H36M-Occl labels or metrics for model selection.
+
+The H18 rows use the existing centered T=9 model (four past and four future
+frames), so they are internal robustness results rather than strict causal
+GBT comparisons.  The matched dense center baselines are ResNet
+`47.422/29.201/24.473` and HRNet `47.741/33.821/29.961`; H18 improves all
+three cardinalities for both frontends.  A past-only T=9 clean-trained control
+remains a separate pending experiment.
+
+### Table III. Occlusion-Person，absolute MPJPE (mm)
+
+| Method | 2 cams | 3 cams | 4 cams | 8 cams |
+|---|---:|---:|---:|---:|
+| RANSAC† [42], GBT-reported | 33.7 | 87.5 | 35.0 | 15.5 |
+| ScoreFuse† [42], GBT-reported | 32.7 | 25.7 | 21.4 | 15.0 |
+| AdaFuse† [42], GBT-reported | — | 26.2 | 19.7 | 12.6 |
+| GBT (HRNet), reported | 30.8 | 22.9 | 19.6 | 14.2 |
+| `GQ-RUMPL-E2-T` (HRNet) | TBD | TBD | TBD | TBD |
+
+### Table IV. CMU→H36M 泛化，matched joints，absolute MPJPE (mm)
+
+| Method | Dir | Disc | Eat | Greet | Phone | Pose | Purch | Sit | SitD | Smoke | Photo | Wait | Walk | WalkD | WalkT | Avg |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Algebraic Triangulation (HRNet), GBT-reported | 44.6 | 43.5 | 42.2 | 42.5 | 43.7 | 41.6 | 48.5 | 46.8 | 51.7 | 45.4 | 45.7 | 42.3 | 40.3 | 45.6 | 39.8 | 44.3 |
+| GBT (HRNet), reported | 33.9 | 32.5 | 32.6 | 33.7 | 38.3 | 30.8 | 35.1 | 56.9 | 85.9 | 36.0 | 37.9 | 33.3 | 29.1 | 38.7 | 28.7 | 38.9 |
+| `GQ-RUMPL-E2-T` (HRNet) | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+### Table V. H36M 与 CMU 主结果，absolute MPJPE (mm)
+
+| Method | H36M | CMU |
+|---|---:|---:|
+| Cross View Fusion [27]†, GBT-reported | 26.2 | — |
+| RANSAC Baseline [10], GBT-reported | — | 33.4 |
+| Algebraic Triangulation [10]†, GBT-reported | 19.2 | 21.3 |
+| Volumetric [10]†, GBT-reported | 17.7 | 13.7 |
+| Remelli et al. [29]†, GBT-reported | 30.2 | — |
+| Epipolar Transformers [8]†, GBT-reported | 27.1 | — |
+| TransFusion [17]†, GBT-reported | 25.8 | — |
+| GBT (ResNet-152)†, reported | 22.7 | — |
+| Algebraic Triangulation (HRNet), GBT-reported | 44.2 | 26.2 |
+| GBT (HRNet), reported | 26.0 | 17.2 |
+| `GQ-RUMPL-E2-T` (ResNet-152)† | **19.971** | TBD/— |
+| HRNet C2 + E2-C2 + H18 | **27.219** | TBD |
+
+### Table VI-A. GBT 原文组件消融（仅作参考布局）
+
+| Train→Test | none | +Centering | +Synthetic | +Conf. bias | +Geom. bias | all |
+|---|---:|---:|---:|---:|---:|---:|
+| CMU→CMU | 22.4 | 18.9 | 19.3 | 17.7 | 17.1 | 17.2 |
+| H36M→H36M | 39.0 | 49.2 | 40.6 | 33.2 | 33.1 | 26.0 |
+| H36M→H36M-Occl | 43.1 | 52.3 | 44.0 | 35.5 | 37.2 | 31.6 |
+| CMU→H36M | 101.2 | 57.2 | 55.7 | 43.0 | 43.1 | 38.9 |
+
+### Table VI-B. 我们的累加组件消融
+
+| Train→Test | RUMPL rays | +Tri-anchor/Plücker | +Global Query | +22-cand. E2 | +Identity hinge | +H18 |
+|---|---:|---:|---:|---:|---:|---:|
+| H36M→H36M, HRNet | TBD | **38.686/30.943/28.629** | not selected | **38.700/29.486/27.274** | — | **37.704/29.231/27.219** |
+| H36M→H36M, ResNet | **41.470/26.081/24.157** | included in H76 | **32.312/25.101/23.536** | **32.331/22.646/20.361** | **32.319/22.558/20.272** | **31.215/22.008/19.971** |
+| H36M→H36M-Occl, HRNet | TBD | TBD | TBD | TBD | TBD | TBD |
+| H36M→H36M-Occl, ResNet | TBD | TBD | TBD | TBD | TBD | TBD |
+| CMU→CMU, HRNet | TBD | TBD | TBD | TBD | TBD | TBD |
+| CMU→H36M, HRNet | TBD | TBD | TBD | TBD | TBD | TBD |
+
+H36M clean 的每个格子记录 `V2/V3/V4`。正式排版时可按数据集拆表，但不得
+删除中间组件，否则无法判断提升来自 generator、candidate fusion 还是 temporal。
+
+### Table VII. 时序帧数，四相机，absolute MPJPE (mm)
+
+| Dataset/method | 1 | 2 | 3 | 6 | 9 |
+|---|---:|---:|---:|---:|---:|
+| H36M, GBT-reported | 29.4 | 27.9 | 27.7 | 27.3 | 26.0 |
+| H36M-Occl, GBT-reported | 41.5 | 34.9 | 34.0 | 32.5 | 31.6 |
+| H36M, ours HRNet | **27.274** | TBD | TBD | TBD | **27.219** |
+| H36M-Occl, ours HRNet | TBD | TBD | TBD | TBD | TBD |
+| H36M, ours ResNet | **20.272** | TBD | TBD | TBD | **19.971** |
+| H36M-Occl, ours ResNet | TBD | TBD | TBD | TBD | TBD |
+
+### Supplementary Table S1. 严格 matched 双前端比较
+
+| frontend | `GQ-RUMPL` T=1 V2/V3/V4 | `+E2` T=1 V2/V3/V4 | `+H18` T=9 V2/V3/V4 |
+|---|---:|---:|---:|
+| HRNet-W32/YOLOX-X | Query not selected; C2 **38.686/30.943/28.629** | **38.700/29.486/27.274** | **37.704/29.231/27.219** |
+| ResNet-152† | **32.312/25.101/23.536** | **32.319/22.558/20.272** | **31.215/22.008/19.971** |
+
+### Supplementary Table S2. CMU 视角数量扩展
+
+| Method | 2 cams | 4 cams | 5 cams | 6 cams | 8 cams |
+|---|---:|---:|---:|---:|---:|
+| Algebraic Triangulation (HRNet) | TBD | TBD | TBD | TBD | TBD |
+| `GQ-RUMPL-E2` (HRNet) | TBD | TBD | TBD | TBD | TBD |
+| `GQ-RUMPL-E2-T` (HRNet) | TBD | TBD | TBD | TBD | TBD |
+
+### B.3 第一阶段冻结结论
+
+GBT clean 参考值为 ResNet `29.9/24.4/22.7`、HRNet
+`36.8/30.4/26.0`。第一阶段已经完成并冻结，但“完成”不等于全面超过参考值：
+ResNet 最终结果为 `31.215/22.008/19.971`，HRNet 最终结果为
+`37.704/29.231/27.219`。所有 checkpoint、温度和 epoch 均未依据 S9/S11 选择；
+下一阶段遮挡测试不得用于反向挑选 clean 权重。详细事实、差值、负消融和路径见
+`/home/lixiaob/cjy/STAGE1_H36M_CLEAN_RESULTS_FOR_PAPER_20260822.md`。
+
+---
+
+## 历史稿说明（2026-08-15，冲突内容不得作为当前方法）
+
+下面从“历史稿给网页版 Codex 的直接指令”开始的内容记录了此前大量探索、诊断、
+失败实验和候选论文故事。它可以用于 Related Work、实验动机和失败经验，但任何
+与上面 2026-08-22 冻结路线冲突的模型描述、数值或结论都必须忽略。
+
+## 0. 历史稿给网页版 Codex 的直接指令
 
 请依据本文件撰写一篇完整的多视角 3D 人体姿态估计论文初稿。论文可以先用中文写，也可以直接写成英文 CVPR/ICCV 风格。写作时遵守以下要求：
 
@@ -1328,13 +1850,20 @@ available = [
 
 ---
 
-## 28. 可直接交给 Codex 的最终写作要求
+## 28. 历史稿旧写作要求（已被文首 2026-08-22 指令覆盖）
 
-请生成一篇结构完整、逻辑自洽的论文初稿，至少包含：标题、摘要、引言、相关工作、问题定义、方法公式、训练目标、实验协议、主结果表、消融、失败分析、局限性和结论。方法部分优先使用本文件第 3--14 节的公式。结果部分严格区分第 17.1 正式坐标级结果与第 17.4 历史增强输入结果；所有正在运行或尚未重做的结果用 `--` 或 `TBD`。外部对比使用第 18 节，并保留 Input/T/Alignment/BBox 等协议列。请不要夸大创新，不要把来源于 RUMPL、GBT、Epipolar Transformer、MVGFormer、GHT、AdaFuse 的单独思想声称为首次；把创新集中到针对 Negative View Problem 的有机组合、反事实逐关节效用和严格相机子集评估。
+> 本段仅保存旧稿演化历史，不再是给 Codex 的有效指令。正式写作必须使用文首
+> “最高优先级路线覆盖声明”、A 节冻结技术方案和 B 节 GBT 对齐表，不能优先使用
+> 下述旧稿第 3--14 节，也不能把旧 RIGR/图像特征/view-bias 路线写成当前方法。
+
+旧要求曾计划生成一篇包含标题、摘要、引言、相关工作、问题定义、方法公式、训练
+目标、实验协议、主结果表、消融、失败分析、局限性和结论的论文，并将创新集中到
+Negative View Problem、反事实逐关节效用和严格相机子集评估。此目标结构仍可参考，
+但技术事实和结果必须完全服从文首 2026-08-22 路线。
 
 ---
 
-## 29. 相关论文在本稿中的准确作用
+## 29. 历史路线中相关论文的作用（不得直接当作当前模块表）
 
 | 论文 | 本稿借鉴内容 | 本稿不能声称的内容 | 本稿差异 |
 |---|---|---|---|
@@ -1922,3 +2451,205 @@ annotation-box crop、384×384 transform、相机内参更新和 joint mapping�
 
 执行脚本：`OpenRUMPL_baseline_audit/launch_resnet152_rumpl_gbt_screen_gpu1_20260817.sh`；
 输出根目录：`/mnt/data/cjyoutput/gbt_aligned_resnet_20260817_gpu1/`。
+
+## 2026-08-22：Global Joint-Query 后的严格时序修复结果
+
+ResNet Global Joint-Query + E2 identity-hinge 的稠密时序前端已从原始 H36M
+temporal GT PKL 重新生成，修复了旧缓存继承 HRNet 去畸变记录、导致相机畸变参数被
+提前置零的问题。修正后的 T=9 中心帧空间基线为
+`32.437/22.581/20.306 mm`，与稀疏单帧 identity-hinge
+`32.319/22.558/20.272 mm` 基本对齐。
+
+H18 使用 9 帧、stride 5、hidden 96、2 层、`lr=5e-5`，只在训练主体 holdout
+选择 epoch 3，随后对 S9/S11 评估一次：
+
+| ResNet 路线 | V2 | V3 | V4 |
+|---|---:|---:|---:|
+| matched dense T=1 center baseline | 32.437 | 22.581 | 20.306 |
+| + H18，T=9 | **31.215** | **22.008** | **19.971** |
+| 改善 | **1.222** | **0.572** | **0.335** |
+
+三种视角数均改善，因此该时序模块保留用于 clean/occlusion 表格。正式结果：
+`/mnt/data/cjyoutput/gbt_aligned_resnet_20260822/v2_repair/B_global_query_full/h18_identity_hinge_v2_gtinput/result.json`。
+
+HRNet C2→Query-only→全网 `5e-6` 的 U2 结果为
+`38.487/30.913/28.676 mm`，相对 C2 改善 `0.199/0.030 mm`，但 V4 退化
+`0.047 mm`，不作为统一最优。直接从 C2 初始化并联合训练的 A/B 已完成：A 为
+`38.742/30.957/28.651 mm`，B 为 `38.921/30.870/28.712 mm`，均未同时改善
+三列。highLR 初始化 A/B 分别为 `37.026/31.612/30.417 mm` 和
+`36.905/31.465/30.280 mm`，也未超过其 source
+`36.885/31.451/30.277 mm`。因此 HRNet 第一阶段不采用 Global Joint-Query，
+最终保留 C2+E2-C2+H18 的 `37.704/29.231/27.219 mm`。完整冻结结论见
+`/home/lixiaob/cjy/STAGE1_H36M_CLEAN_RESULTS_FOR_PAPER_20260822.md`。
+
+## 2026-08-23：Human3.6M-Occluded 官方生成器对齐与遮挡主结果
+
+> **论文更新入口（2026-08-24）**：本节的最终表格、论文可用描述、消融逻辑和
+> T=9 回填规则统一维护在
+> `/home/lixiaob/cjy/STAGE2_H36M_OCC_RESULTS_FOR_PAPER_20260824.md`。后续生成论文时
+> 应以该文件和 `final_occ23_table.json` 为准；本节早期 T=1 数字仅作空间消融，不能
+> 替代完整的 Stage-2 T=9 主结果。
+
+为了避免使用 GBT 未开源白方块协议作为唯一遮挡证据，本阶段增加了 Bragagnolo
+Human3.6M-Occluded 官方生成器和 SkelSplat WACV 2026 Table 4 路线。模型仍只在
+clean H36M 上训练；测试时不使用遮挡微调、遮挡验证集选 epoch、温度或 seed。
+
+### 公开协议设置
+
+遵循公开 Human3.6M-Occ 生成流程，在 H36M 图像上粘贴 Pascal VOC 物体，并固定
+Occ-2/Occ-3 的遮挡视角数、物体尺度、随机种子和全部相机组合。所有方法使用同一批
+遮挡输入；模型只在 clean H36M 上训练，遮挡测试集不参与权重或超参数选择。协议恢复
+诊断和控制差值仅保留在内部审计文件，不在论文正文展开。
+
+### 正式冻结结果
+
+所有数字为 H36M S9/S11、All-17、absolute MPJPE、action-equal；V2/V3 平均全部
+相机组合，V4 为四相机。E2 是两个 clean-trained scorer seed 的均值。
+
+| input / frozen chain | Occ-2 V2 | Occ-2 V3 | Occ-2 V4 | Occ-3 V2 | Occ-3 V3 | Occ-3 V4 |
+|---|---:|---:|---:|---:|---:|---:|
+| HRNet C2 direct | 55.510 | 38.286 | 34.175 | 64.060 | 42.003 | 36.894 |
+| HRNet C2 + E2 | 55.576 | 33.840 | **29.406** | 64.143 | 37.122 | **31.600** |
+| ResNet GQ direct | 50.409 | 36.722 | 34.534 | 61.120 | 42.832 | 40.286 |
+| **ResNet GQ + E2** | **50.511** | **29.336** | **23.383** | **61.267** | **34.067** | **26.092** |
+
+论文主比较只能使用 V4，因为 SkelSplat Table 4 没有 V2/V3：
+
+| Table-4 method, ResNet-152 or stated input | Occ-2 V4 | Occ-3 V4 |
+|---|---:|---:|
+| Algebraic Triangulation (paper) | 43.2 | 48.9 |
+| RANSAC | 33.7 | 38.6 |
+| AdaFuse | 27.9 | 31.2 |
+| MV Pose Fusion | 33.4 | 36.7 |
+| SkelSplat (MeTRAbs) | 29.6 | 31.1 |
+| SkelSplat (ResNet-152) | 24.6 | 27.0 |
+| **Ours ResNet GQ + E2, T=1 ablation** | **23.383** | **26.092** |
+
+Ours T=1 比 SkelSplat ResNet-152 低 `1.217/0.908 mm`；最终主表以完整 T=9
+baseline 替换该行，并增加 `T` 列。T=1 只保留在消融表。
+
+### 对方法故事的意义
+
+E2 在 clean 上主要改善 V3/V4，而在遮挡下作用显著放大。相对 matched direct
+generator，ResNet V4 在 Occ-2/Occ-3 分别降低 `11.151/14.194 mm`，HRNet 降低
+`4.769/5.294 mm`；ResNet 两 seed std 仅 `0.044/0.039 mm`。这支持论文故事：
+Global Joint-Query/RUMPL 保留跨视角射线表征并生成直接姿态，E2 将直接候选和
+confidence-triangulation 候选作为同一关节的多种几何解释，用 set scorer 预测效用并
+soft fuse；当部分视角被污染时，候选差异和 oracle gap 增大，因此 E2 的鲁棒收益远大于
+clean 主表的 0.x mm。
+
+相对完全相同链的 clean E2 V4，ResNet 从 `20.272` 上升到
+`23.383/26.092 mm`，退化仅 `+3.111/+5.820 mm`；HRNet 从 `27.274` 上升到
+`29.406/31.600 mm`，退化 `+2.132/+4.326 mm`。这组同链 clean→occlusion
+退化比跨论文绝对排名更严格，因为输入模型、3D 权重、scorer 和指标完全一致。
+
+分层结果也支持该解释。ResNet E2 的 Occ-2 V2 在子集中含 `0/1/2` 个遮挡视角时为
+`32.420/50.921/66.961 mm`；Occ-3 V3 含 `2/3` 个遮挡视角时为
+`32.360/39.189 mm`。结果随真实污染视角数单调变差，并非某个固定相机带来的偶然值。
+
+关键代码与结果：
+
+- 数据适配：`OpenRUMPL_baseline_audit/generate_h36m_occ_official_adapter_20260823.py`；
+- 前端：`OpenRUMPL_baseline_audit/launch_h36m_occ_official_frontends_20260823.sh`；
+- 冻结 3D 链：`OpenRUMPL_baseline_audit/launch_h36m_occ_official_spatial_eval_20260823.sh`；
+- 遮挡分层：`OpenRUMPL_baseline_audit/evaluate_e2_occlusion_stratified_20260823.py`；
+- Occ-2：`/mnt/data/cjyoutput/h36m_occ_official_20260823/calib_c2_s020_050_occ2/eval/`；
+- Occ-3：`/mnt/data/cjyoutput/h36m_occ_official_20260823/calib_c2_s020_050_occ3/eval/`；
+- 完整审计：`OpenRUMPL_baseline_audit/OCCLUSION_STAGE_PREPARATION_20260822.md`。
+
+### Occ-3-Hard 的协议置信度
+
+Hard 的论文 Algebraic control 为 `120.4 mm`。公开生成器 `0.5--1.0` 在我们子集上
+为 `229.934 mm`；有限候选 `0.3--0.8 / 0.4--0.75 / 0.4--0.78` 分别为
+`203.958 / 111.351 / 337.885 mm`。最大遮挡物会触发离散式离群误差，因此停止继续围绕
+测试控制调上界，冻结最接近的 `0.4--0.75`，差 `-9.049 mm`。Hard 结果必须标成
+**approximate Hard control-aligned reconstruction**，其证据等级低于普通 Occ-2/Occ-3。
+
+## 2026-08-24：官方强遮挡协议的 V2/V3/V4 少视角补充实验
+
+为给少视角遮挡结论增加一个完全由公开代码定义、且确实包含 V2/V3/V4 的协议，
+补充运行 Bragagnolo 等人 *Multi-view Pose Fusion for Occlusion-Aware 3D Human
+Pose Estimation* 随附的 Human3.6M-Occluded 生成器。该实验与上一节的
+SkelSplat control-aligned ordinary Occ-2/Occ-3 结果是两个独立协议，不能混表：
+
+- 官方生成器 commit `4a2625805d6979e92283ee9c93ee476a1d8c6a82`；
+- S9/S11 共 2021 个同步组，沿用 damaged-sequence filter；
+- 每组随机遮挡 4 个视角中的 3 个，每个遮挡视角粘贴 2 个 Pascal VOC 物体；
+- 物体尺度为人体框短边的 `0.5--1.0`，随机种子 `42`；
+- V2/V3/V4 穷举 `6/4/1` 个相机子集；
+- action-equal All-17 absolute MPJPE，无对齐；所有学习模型只在 clean H36M
+  训练，不做遮挡微调或遮挡集选参。
+
+同一 2D 坐标、置信度和相机参数下的 T=1 消融结果为：
+
+> 口径更正：下表只用于分解 direct generator、几何控制和 E2 的作用，不能作为
+> 第二阶段最终 Ours。第二阶段主结果必须继承第一阶段冻结的完整 baseline：ResNet
+> `GQ-RUMPL-E2-H18` 和 HRNet `C2-E2-H18`。由于本次官方缓存是 stride-64，尚不能
+> 构造 T=9；完整主方法需要在同一官方生成器的 dense stride-5 版本上另行评估。
+
+| ResNet-152 matched coordinates | V2 | V3 | V4 |
+|---|---:|---:|---:|
+| Algebraic confidence DLT | 1249.311 | 240.155 | 203.438 |
+| Confidence ray intersection | 259.889 | 143.507 | 129.557 |
+| IRLS confidence rays | 259.882 | 118.661 | 87.111 |
+| AdaFuse public RANSAC | 1249.732 | 179.786 | 111.966 |
+| Frozen direct generator | **208.422** | 132.789 | 124.119 |
+| **Ours E2** | 209.345 | **100.427** | **64.486** |
+
+| HRNet-W32 matched coordinates | V2 | V3 | V4 |
+|---|---:|---:|---:|
+| Algebraic confidence DLT | 1700.274 | 578.572 | 295.643 |
+| Confidence ray intersection | 428.720 | 160.219 | 118.136 |
+| IRLS confidence rays | 426.362 | 143.910 | 86.799 |
+| AdaFuse public RANSAC | 3183.242 | 460.475 | 210.466 |
+| Frozen direct generator | **298.312** | 138.207 | 106.724 |
+| **Ours E2** | 299.117 | **122.752** | **80.942** |
+
+E2 相对 direct generator 在 ResNet V3/V4 改善 `32.362/59.633 mm`，在
+HRNet V3/V4 改善 `15.455/25.782 mm`；相对最强的非 E2 matched control，
+ResNet 仍改善 `18.234/22.626 mm`，HRNet 改善 `15.455/5.857 mm`。但 V2
+分别退化 `0.923/0.804 mm`。这是后续方法需要正面解决的边界：3/4 原始视角被
+遮挡时，两视角子集可能两条射线同时受污染，缺少第三条冗余射线进行离群判别，
+所以候选重评分在 V3/V4 非常有效，却不能凭空恢复 V2 中缺失的观测信息。
+
+分层统计进一步排除了“某个固定坏相机”的解释。ResNet E2 在 V2 子集中含
+`1/2` 与 `2/2` 个遮挡视角时分别为 `161.016/257.675 mm`，HRNet 为
+`215.084/383.150 mm`；V3 子集中含 `2/3` 与 `3/3` 个遮挡视角时 ResNet 为
+`88.270/136.899 mm`，HRNet 为 `105.571/174.295 mm`。只要子集中仍有 clean
+view，误差就明显更低；V2 无 clean view 时才是当前核心失败模式。
+
+Pose Fusion Table 4 仅给出精确 V4：RANSAC `80.7`、Algebraic `127.4`、
+AdaFuse `41.1`、TransFusion `96.5`、Pose Fusion `37.8 mm`。我们的 ResNet E2
+外部参考上超过 RANSAC、Algebraic、TransFusion，但没有超过 AdaFuse 和 Pose
+Fusion。由于其各自使用不同图像前端，这些数字只放在 separate external reference
+table，不声明 matched-input SOTA。Pose Fusion Figure 6 的 V2/V3 只有曲线，不能
+伪造为精确表格数据。
+
+本表保持单帧。H18 需要 stride-5 的连续 T=9 缓存，而当前官方强遮挡缓存是
+stride-64 且遮挡随机独立；若做时序遮挡实验，必须另行生成并审计稠密序列，不能把
+两种口径混在主表中。
+
+审计文件和结果：
+
+- `OpenRUMPL_baseline_audit/POSEFUSION_OFFICIAL_OCC_V234_20260824.md`；
+- `OpenRUMPL_baseline_audit/collect_posefusion_occ_v234_table_20260824.py`；
+- `/mnt/data/cjyoutput/h36m_occ_official_20260823/occ3/eval/posefusion_v234_table.json`；
+- `/mnt/data/cjyoutput/h36m_occ_official_20260823/occ3/eval/posefusion_v234_table.md`。
+
+### GBT 中 Algebraic Triangulation 数字的来源
+
+GBT 的 `Alg. Tri. [10]` 指向 Iskakov 等人的 ICCV 2019 *Learnable
+Triangulation of Human Pose*。原论文报告了 clean filtered H36M 上学习置信度的
+Algebraic 分支，在可用全部相机下 absolute MPJPE 为 `19.2 mm`；它没有报告 GBT
+所列的全部 V2/V3 相机组合，也没有 GBT 的白方块 H36M-Occl 实验。
+
+GBT 正文明确说明：ResNet 行使用 Iskakov 公开的 H36M-finetuned ResNet-152 输出，
+再应用 Algebraic Triangulation；HRNet 行则把 GBT 自己提取的 HRNet 坐标送入同一
+三角化基线；所有视角数都平均全部相机组合。因此 Table I 的 V2/V3 和 Table II 的
+全部遮挡数字属于 GBT 自己重跑的结果，不是从2019论文直接摘录。GBT clean V4 的
+`19.1 mm` 与原论文 `19.2 mm` 接近，也支持这一实现来源。
+
+Iskakov 的网络、checkpoint 和代数求解器有公开代码，我们已在本地保存并使用；但
+GBT 没有公开白方块尺寸、精确放置实现和随机种子，所以其 Table II 仍不能 byte-level
+复现。论文中只能称 GBT-reported reference，不能把我们猜测生成的遮挡集称为 GBT
+官方测试集。

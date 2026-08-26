@@ -10,6 +10,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from dataset.gbt_ray_augmentation import (
     apply_gbt_training_augmentation,
     invert_scene_transform,
+    replace_with_synthetic_camera_ray,
 )
 
 
@@ -83,9 +84,37 @@ def test_zero_synthetic_views_preserves_view_count():
     )
 
 
+def test_single_frame_replacement_preserves_capacity_and_real_view():
+    rays, target = make_sequence()
+    single_rays = rays[:, 0]
+    single_target = target[:, 0]
+    torch.manual_seed(10)
+    replaced, indices = replace_with_synthetic_camera_ray(
+        single_rays,
+        single_target,
+        replace_probability=1.0,
+        radius_min_m=3.0,
+        radius_max_m=6.0,
+        height_min_m=1.0,
+        height_max_m=2.5,
+    )
+    assert replaced.shape == single_rays.shape
+    assert torch.all(indices >= 0)
+    rows = torch.arange(len(indices))
+    point = replaced[rows, :, indices, 3:6]
+    direction = replaced[rows, :, indices, :3]
+    displacement = single_target - point
+    assert torch.cross(displacement, direction, dim=-1).norm(dim=-1).max() < 2e-5
+    # Exactly one view changes, leaving at least one real observation even
+    # when the complete input has only two views.
+    changed = (replaced - single_rays).abs().amax(dim=(1, 3)) > 1e-7
+    assert torch.all(changed.sum(dim=1) == 1)
+
+
 def main():
     test_synthetic_rays_and_scene_transform_are_geometrically_consistent()
     test_zero_synthetic_views_preserves_view_count()
+    test_single_frame_replacement_preserves_capacity_and_real_view()
     print("GBT ray augmentation tests passed")
 
 
