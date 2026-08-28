@@ -39,6 +39,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/mnt/data/cjyoutput/h36m_occ_voc_dense_20260824"),
     )
+    parser.add_argument(
+        "--algebraic-root",
+        type=Path,
+        default=Path(
+            "/mnt/data/cjyoutput/h36m_occ_voc_dense_20260824/"
+            "current_algebraic_reeval_20260828"
+        ),
+        help="Matched Algebraic reevaluation on the current dense frontends.",
+    )
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--output-md", required=True, type=Path)
     return parser.parse_args()
@@ -79,14 +88,19 @@ def main() -> None:
             e2 = load(sparse_root / "eval" / f"{frontend}_spatial" / "e2_result.json")
             temporal = load(base / "final_h18_t9.json")
             if frontend == "resnet152":
-                algebraic = load(sparse_root / "eval/official_lt_algebraic_report.json")
+                algebraic_path = (
+                    args.algebraic_root
+                    / f"{variant}_resnet152_official_algebraic.json"
+                )
+                algebraic = load(algebraic_path)
                 alg = {
                     view: float(algebraic["results"][view]["absolute"]["action_equal_mm"])
                     for view in VIEWS
                 }
-                alg_name = "official LT learned-confidence Algebraic"
+                alg_name = "official LT learned-confidence Algebraic on current dense input"
             else:
-                algebraic = load(sparse_root / "eval/hrnet_algebraic_v234.json")
+                algebraic_path = args.algebraic_root / f"{variant}_hrnet_algebraic.json"
+                algebraic = load(algebraic_path)
                 alg = {
                     view: float(
                         algebraic["results"][view][
@@ -95,9 +109,10 @@ def main() -> None:
                     )
                     for view in VIEWS
                 }
-                alg_name = "confidence-weighted Algebraic on HRNet coordinates"
+                alg_name = "confidence-weighted Algebraic on current dense HRNet coordinates"
             stage[frontend] = {
                 "algebraic_name": alg_name,
+                "algebraic_source": str(algebraic_path.resolve()),
                 "algebraic_t1_mm": alg,
                 "ours_e2_t1_ablation_mm": {
                     view: float(e2["mean_mm"][view]) for view in VIEWS
